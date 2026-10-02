@@ -1,0 +1,10 @@
+{
+  "bindings": {
+    "noclip": 0
+  },
+  "graphics": {
+    "film_grain": null,
+    "vignette": null,
+    "chromatic_aberration": null
+  }
+}

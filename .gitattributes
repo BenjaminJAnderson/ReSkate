@@ -1,0 +1,16 @@
+# Vendor hashes cover exact upstream bytes, including nested headers.
+External/rapidjson/** -text
+External/rapidjson/** whitespace=-blank-at-eol
+
+External/detours/** -text
+External/detours/** whitespace=-blank-at-eol
+
+External/imgui/** -text
+External/imgui/** whitespace=-blank-at-eol
+
+External/spdlog/** -text
+
+External/steam_networking/** -text
+External/steam_networking/** whitespace=-blank-at-eol
+
+External/miniz/** -text

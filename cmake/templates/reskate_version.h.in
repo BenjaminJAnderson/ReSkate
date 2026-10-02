@@ -1,0 +1,8 @@
+#pragma once
+#include <string_view>
+
+namespace dingosdk {
+// The release version (DINGOSDK_VERSION); local builds say 0.0.0.
+inline constexpr std::string_view reskate_version = "@reskate_version_escaped@";
+inline constexpr bool reskate_release_build = reskate_version != "0.0.0";
+}

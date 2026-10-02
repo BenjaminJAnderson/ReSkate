@@ -1,0 +1,50 @@
+# Assemble contributor-facing JSON fragments using CMake's built-in JSON API.
+# No Python, package manager, or runtime file scanning is required.
+function(dingosdk_read_json result path)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${path}")
+    file(READ "${path}" content)
+    string(JSON kind ERROR_VARIABLE error TYPE "${content}")
+    if(NOT error STREQUAL "NOTFOUND" OR NOT kind STREQUAL "OBJECT")
+        message(FATAL_ERROR "Expected a JSON object in ${path}: ${error}")
+    endif()
+    set(${result} "${content}" PARENT_SCOPE)
+endfunction()
+
+function(dingosdk_append_member result object member value)
+    if(NOT member MATCHES "^[a-z_]+$")
+        message(FATAL_ERROR "Invalid profile section name '${member}'")
+    endif()
+    string(JSON existing ERROR_VARIABLE error TYPE "${object}" "${member}")
+    if(error STREQUAL "NOTFOUND")
+        message(FATAL_ERROR "Duplicate assembled section '${member}'")
+    endif()
+    string(JSON count LENGTH "${object}")
+    string(REGEX REPLACE "\\}[ \t\r\n]*$" "" body "${object}")
+    if(count GREATER 0)
+        string(APPEND body ",")
+    endif()
+    # Preserve source text so the strict JSON reader can reject duplicate keys
+    # instead of silently normalizing them away during CMake assembly.
+    set(${result} "${body}\"${member}\":${value}}" PARENT_SCOPE)
+endfunction()
+
+set(profile_data_root "${PROJECT_SOURCE_DIR}/config")
+dingosdk_read_json(profile_manifest "${profile_data_root}/defaults/manifest.json")
+string(JSON base_name GET "${profile_manifest}" base)
+dingosdk_read_json(profile_defaults "${profile_data_root}/defaults/${base_name}")
+string(JSON section_count LENGTH "${profile_manifest}" sections)
+math(EXPR last_section "${section_count}-1")
+foreach(index RANGE ${last_section})
+    string(JSON section MEMBER "${profile_manifest}" sections ${index})
+    string(JSON filename GET "${profile_manifest}" sections "${section}")
+    dingosdk_read_json(fragment "${profile_data_root}/defaults/${filename}")
+    dingosdk_append_member(profile_defaults "${profile_defaults}" "${section}" "${fragment}")
+endforeach()
+
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated")
+# Keep a complete copy in the build directory for validation and users who
+# need a legacy loose defaults override.
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/generated/reskate.defaults.json" "${profile_defaults}\n")
+string(HEX "${profile_defaults}" DINGOSDK_DEFAULTS_HEX)
+string(REGEX REPLACE "(..)" "0x\\1," DINGOSDK_DEFAULTS_BYTES "${DINGOSDK_DEFAULTS_HEX}")
+configure_file(cmake/templates/profile_defaults.h.in generated/embedded_profile_defaults.h @ONLY)

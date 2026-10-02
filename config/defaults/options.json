@@ -1,0 +1,9 @@
+{
+  "DisableFTUE": true,
+  "ReSkate.UnlockNeighborhoods": true,
+  "ReSkate.UnlockPresetSlots": true,
+  "ReSkate.MaxNeighborhoodRanks": true,
+  "ReSkate.UnlockBusStops": true,
+  "ReSkate.UnlockCosmetics": true,
+  "ReSkate.UnlockObjects": true
+}

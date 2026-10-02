@@ -1,0 +1,13 @@
+{
+  "enabled": true,
+  "posts": [
+    {
+      "id": "reskate-offline",
+      "title": "YOU'RE OFFLINE",
+      "description": "Live news will be back when you reconnect.",
+      "body": "ReSkate couldn't reach the news feed, so you're seeing this offline post instead.\n\nEverything else still works: skate San Van, play your mods and custom maps, and host a session.\n\nYour skater, outfits and progress are saved on this PC.\n\nReconnect to see the latest ReSkate news.",
+      "fallback_small": "UI/Textures/Features/News/img_NewsSystem_Fallback_1920",
+      "fallback_large": "UI/Textures/Features/News/img_NewsSystem_Fallback_1920"
+    }
+  ]
+}

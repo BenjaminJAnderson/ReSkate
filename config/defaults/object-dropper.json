@@ -1,0 +1,7 @@
+{
+  "limits": {
+    "enabled": true,
+    "max_objects": 256,
+    "radius_metres": 500
+  }
+}

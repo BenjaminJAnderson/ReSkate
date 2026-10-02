@@ -1,0 +1,823 @@
+#include "session_internal.h"
+#include "Extension/Multiplayer/Hud/native_indicators.h"
+#include "Extension/Multiplayer/Hud/native_player_ui.h"
+#include "Extension/Multiplayer/Hud/custom_nametags.h"
+#include "Extension/Profile/local_profile_runtime.h"
+#include "Extension/Objects/network_object_runtime.h"
+#include "Extension/Objects/ParkEditor/park_editor_runtime.h"
+#include "Engine/Core/Platform/launcher_support.h"
+#include "Engine/Game/Multiplayer/session_tools.h"
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <charconv>
+#include <stdexcept>
+#include <ctime>
+
+namespace dingosdk::multiplayer {
+using namespace session_detail;
+namespace session_detail {
+void apply_distances(Session &s, const MultiplayerDistances &distances) {
+    if (s.distances == distances) return;
+    s.distances = distances;
+    // Re-evaluate every recipient using the new boundaries, without carrying a
+    // previous band's hysteresis or waiting for its old send deadline.
+    for (auto &peer : active_peers(s)) peer.pose_delivery = {};
+}
+void apply_object_placement(Session &s, ObjectPlacement policy) {
+    s.object_placement = policy;
+    // On a dedicated server "host only" means its admins.
+    set_lobby_object_placement_allowed(object_placement_allowed(policy, s.mode == Mode::host || s.server_admin));
+}
+void apply_nametags(const Session &s) {
+    set_custom_nametags_enabled(s.nametags && s.custom_nametags);
+    set_native_nametags_enabled(s.nametags && !s.custom_nametags);
+    set_native_compass_enabled(!(s.nametags && s.custom_nametags));
+}
+void apply_guest_tools(Session &s, bool noclip, bool no_bail, bool boosts) {
+    s.guest_noclip = noclip;
+    s.guest_no_bail = no_bail;
+    s.guest_boosts = boosts;
+    const bool exempt = s.mode == Mode::host || s.server_admin;
+    set_session_tools_allowed(noclip || exempt, no_bail || exempt, boosts || exempt);
+}
+} // namespace session_detail
+namespace {
+std::string edit_distances(Session &s, std::string_view argument) {
+    if (s.mode != Mode::host) return "Only the lobby host can change TPS distances.";
+    MultiplayerDistances value;
+    for (auto *field : {&value.full_rate_return, &value.half_rate_start, &value.half_rate_return, &value.low_rate_start}) {
+        const auto first = argument.find_first_not_of(" \t");
+        if (first == std::string_view::npos) return "Enter all four TPS distances in metres.";
+        argument.remove_prefix(first);
+        const auto end = argument.find_first_of(" \t");
+        const auto token = argument.substr(0, end);
+        const auto result = std::from_chars(token.data(), token.data() + token.size(), *field);
+        if (result.ec != std::errc{} || result.ptr != token.data() + token.size())
+            return "TPS distances must be whole metres between 0 and 10000.";
+        argument.remove_prefix(token.size());
+    }
+    if (argument.find_first_not_of(" \t") != std::string_view::npos || !value.valid())
+        return "Use ordered distances: return to full TPS < drop to 10 <= return to 10 < drop to 5 (maximum 10000 m).";
+    apply_distances(s, value);
+    s.roster_dirty = true; // Reliable host roster distributes these on the next ready network tick.
+    load_host_preferences(s);
+    s.host_preferences.distances = value;
+    save_host_preferences(s);
+    return "TPS distances applied to the lobby. Connected players and new joiners use the host's settings.";
+}
+// Native widgets retain their activation callback. Resolve toggle requests
+// against live state, never a value captured when the widget opened.
+std::optional<bool> parse_switch(std::string_view argument, bool current) {
+    if (argument == "toggle") return !current;
+    if (argument == "on" || argument == "off") return argument == "on";
+    return {};
+}
+// ---- teleports ----
+std::string lowered(std::string_view text) {
+    std::string result(text);
+    for (auto &c : result) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return result;
+}
+std::string peer_name(Session &s, const Peer &p) {
+    return p.member.name.empty() ? s.transport.name(p.member.id) : p.member.name;
+}
+// The one other player a name start (or SteamID64) means; null with `error` set otherwise.
+Peer *find_player(Session &s, std::string_view who, std::string &error) {
+    std::uint64_t id{};
+    const auto parsed = std::from_chars(who.data(), who.data() + who.size(), id);
+    const bool numeric = parsed.ec == std::errc{} && parsed.ptr == who.data() + who.size();
+    Peer *match{};
+    for (auto &p : active_peers(s)) {
+        if (!p.handshaken || !p.member.id || (dedicated_host(s) && p.member.id == s.host_id)) continue;
+        if (numeric ? p.member.id == id : lowered(peer_name(s, p)).starts_with(lowered(who))) {
+            if (match) { error = "More than one player matches \"" + std::string(who) + "\"."; return nullptr; }
+            match = &p;
+        }
+    }
+    if (!match) error = "No player matches \"" + std::string(who) + "\".";
+    return match;
+}
+// party: "invite|join|kick|promote <player>", "accept|decline [player]", "leave", "open",
+// "close" or "status". Menus pass SteamID64s; people type the start of a name.
+std::string party_command(Session &s, std::string_view argument) {
+    while (!argument.empty() && argument.front() == ' ') argument.remove_prefix(1);
+    const auto space = argument.find(' ');
+    const auto verb = lowered(argument.substr(0, space));
+    auto who = space == std::string_view::npos ? std::string_view{} : argument.substr(space + 1);
+    while (!who.empty() && who.front() == ' ') who.remove_prefix(1);
+    if (s.mode != Mode::host && s.mode != Mode::join) return "Parties need a multiplayer session.";
+    const auto name = [&](std::uint64_t id) {
+        auto *p = find_peer(s, id);
+        return p ? peer_name(s, *p) : s.transport.name(id);
+    };
+    if (verb.empty() || verb == "status" || verb == "list") {
+        if (!s.local_party) return dedicated_host(s) ? "You're not in a party. Invite a player from their player card or with: party invite <name>."
+                                                     : "You're the only one in this lobby.";
+        std::string text = std::string(dedicated_host(s) ? "Your party" : "Your lobby's party") + (s.local_party_open ? " (open):" : ":");
+        const auto local = s.transport.status().local_id;
+        text += " " + s.transport.name(local) + (s.local_party_leader ? " (leader)" : "");
+        for (const auto &peer : active_peers(s))
+            if (peer.handshaken && peer.member.id && party_member(s, peer.member.id))
+                text += ", " + peer_name(s, peer) + (peer.member.party_leader ? " (leader)" : "");
+        return text;
+    }
+    if (!dedicated_host(s)) return "Everyone in a lobby is in one party with the host.";
+    static constexpr std::pair<std::string_view, PartyAction> verbs[] = {
+        {"invite", PartyAction::invite}, {"accept", PartyAction::accept}, {"decline", PartyAction::decline},
+        {"join", PartyAction::join},     {"leave", PartyAction::leave},   {"kick", PartyAction::kick},
+        {"remove", PartyAction::kick},   {"promote", PartyAction::promote}, {"leader", PartyAction::promote},
+        {"open", PartyAction::open},     {"close", PartyAction::close}};
+    const auto found = std::find_if(std::begin(verbs), std::end(verbs), [&](const auto &v) { return v.first == verb; });
+    if (found == std::end(verbs)) return "party invite|accept|decline|join|leave|kick|promote|open|close|status";
+    const auto action = found->second;
+    // The game re-applies its direct-join setting now and then: only a change is sent.
+    if ((action == PartyAction::open && s.local_party_open) || (action == PartyAction::close && !s.local_party_open))
+        return {};
+    std::uint64_t player{};
+    if (action == PartyAction::accept || action == PartyAction::decline) {
+        // Without a name: the newest invite.
+        if (who.empty()) {
+            if (s.party_invites.empty()) return "You have no party invites.";
+            player = s.party_invites.back().from;
+        }
+    }
+    if (!player && action != PartyAction::leave && action != PartyAction::open && action != PartyAction::close) {
+        if (who.empty()) return "Name a player.";
+        std::string error;
+        auto *peer = find_player(s, who, error);
+        if (!peer) return error;
+        player = peer->member.id;
+    }
+    auto result = send_party_request(s, action, player);
+    if (!result.empty()) return result;
+    if (action == PartyAction::accept || action == PartyAction::decline) {
+        std::erase_if(s.party_invites, [&](const auto &invite) { return invite.from == player; });
+        ++s.party_revision;
+    }
+    switch (action) {
+    case PartyAction::invite: return "Inviting " + name(player) + "...";
+    case PartyAction::accept: return "Joining " + name(player) + "'s party...";
+    case PartyAction::decline: return "Declined " + name(player) + "'s party invite.";
+    default: return {};
+    }
+}
+// tp: the local skater to another player (beside them) or to x y z.
+std::string teleport_self(Session &s, std::string_view argument) {
+    if (!session_noclip_allowed()) return "The host has turned off noclip and teleporting in this session.";
+    std::array<float, 3> at{};
+    unsigned numbers{};
+    for (auto rest = argument; numbers < 3;) {
+        while (!rest.empty() && rest.front() == ' ') rest.remove_prefix(1);
+        if (rest.empty()) break;
+        const auto end = rest.find(' ');
+        const auto word = rest.substr(0, end);
+        const auto parsed = std::from_chars(word.data(), word.data() + word.size(), at[numbers]);
+        if (parsed.ec != std::errc{} || parsed.ptr != word.data() + word.size()) break;
+        ++numbers;
+        rest = end == std::string_view::npos ? std::string_view{} : rest.substr(end);
+    }
+    if (numbers == 3) {
+        char text[96]{};
+        std::snprintf(text, sizeof text, "Teleporting to (%.1f, %.1f, %.1f).", at[0], at[1], at[2]);
+        return dingosdk::teleport_local_skater(at) ? text : "Teleporting is unavailable right now.";
+    }
+    if (argument.empty()) return "tp <player> or tp <x> <y> <z>";
+    if (s.mode != Mode::host && s.mode != Mode::join) return "Teleporting to a player needs a multiplayer session.";
+    std::string error;
+    auto *p = find_player(s, argument, error);
+    if (!p) return error;
+    if (!p->visible) return peer_name(s, *p) + " is not in the world right now.";
+    at = p->render_pose.root.position;
+    at[0] += 2.0f; // beside them, not inside
+    at[1] += 1.0f;
+    return dingosdk::teleport_local_skater(at) ? "Teleporting to " + peer_name(s, *p) + "."
+                                                      : "Teleporting is unavailable right now.";
+}
+// tpall / tphere: other players to the host, in a ring around them. A dedicated server's
+// admins ask the server instead (see command()).
+std::string teleport_players(Session &s, std::string_view action, std::string_view argument) {
+    if (s.mode != Mode::host) return "Only the host or a server admin can teleport other players.";
+    if (!s.local_root) return "Your skater is not in the world yet.";
+    std::vector<Peer *> players;
+    if (action == "tphere") {
+        if (argument.empty()) return "tphere <player>";
+        std::string error;
+        auto *p = find_player(s, argument, error);
+        if (!p) return error;
+        players.push_back(p);
+    } else {
+        for (auto &p : active_peers(s))
+            if (p.handshaken && p.member.id && p.world_ready) players.push_back(&p);
+        if (players.empty()) return "Nobody else is in the world.";
+    }
+    const auto &at = s.local_root->position;
+    const auto now = now_us();
+    unsigned sent{};
+    for (std::size_t i = 0; i < players.size(); ++i) {
+        const float angle = 6.2831853f * static_cast<float>(i) / static_cast<float>(players.size());
+        auto p = packet(s, PacketKind::teleport, now);
+        p.teleport = {at[0] + 2.5f * std::cos(angle), at[1] + 1.0f, at[2] + 2.5f * std::sin(angle)};
+        if (send_packet(s, players[i]->member.id, p, true, false)) ++sent;
+    }
+    return players.size() == 1 && sent ? "Teleported " + peer_name(s, *players[0]) + " to you."
+                                       : "Teleported " + std::to_string(sent) + " player(s) to you.";
+}
+enum class GuestTool { noclip, no_bail, boosts };
+std::string edit_guest_tool(Session &s, std::string_view argument, GuestTool tool) {
+    const char *name = tool == GuestTool::noclip ? "noclip and teleporting" : tool == GuestTool::no_bail ? "No Bail" : "boosts";
+    if (s.mode != Mode::host) return std::string("Only the session host can change who may use ") + name + ".";
+    auto &current = tool == GuestTool::noclip ? s.guest_noclip : tool == GuestTool::no_bail ? s.guest_no_bail : s.guest_boosts;
+    const auto allowed = parse_switch(argument, current);
+    if (!allowed) return "Choose on, off or toggle.";
+    auto noclip = s.guest_noclip, no_bail = s.guest_no_bail, boosts = s.guest_boosts;
+    (tool == GuestTool::noclip ? noclip : tool == GuestTool::no_bail ? no_bail : boosts) = *allowed;
+    apply_guest_tools(s, noclip, no_bail, boosts);
+    auto &remembered = s.host_preferences;
+    remembered.guest_noclip = noclip;
+    remembered.guest_no_bail = no_bail;
+    remembered.guest_boosts = boosts;
+    save_host_preferences(s);
+    s.roster_dirty = true;
+    return std::string(*allowed ? "Guests may use " : "Guests can no longer use ") + name + ".";
+}
+std::string edit_guest_noclip(Session &s, std::string_view argument) { return edit_guest_tool(s, argument, GuestTool::noclip); }
+std::string edit_guest_no_bail(Session &s, std::string_view argument) { return edit_guest_tool(s, argument, GuestTool::no_bail); }
+std::string edit_guest_boosts(Session &s, std::string_view argument) { return edit_guest_tool(s, argument, GuestTool::boosts); }
+std::string edit_enforce_tuning(Session &s, std::string_view argument) {
+    if (s.mode != Mode::host) return "Only the session host can choose whose physics tuning guests skate with.";
+    const auto enforce = parse_switch(argument, s.enforce_tuning);
+    if (!enforce) return "Choose on, off or toggle.";
+    s.enforce_tuning = *enforce;
+    s.host_preferences.enforce_tuning = *enforce;
+    save_host_preferences(s);
+    s.roster_dirty = true;
+    s.next_tuning_check = 0;
+    return *enforce ? "Guests skate with your physics tuning." : "Guests skate with their own physics tuning.";
+}
+std::string edit_score_check(Session &s, std::string_view argument) {
+    if (dedicated_host(s)) return "The server decides: its admins use \"server score-check off|warn|kick\".";
+    if (s.mode != Mode::host) return "Only the session host can choose whether mods that change scoring or physics are checked.";
+    const auto check = parse_switch(argument, s.score_check);
+    if (!check) return "Choose on, off or toggle.";
+    s.score_check = *check;
+    s.host_preferences.score_check = *check;
+    save_host_preferences(s);
+    for (auto &peer : active_peers(s))
+        if (peer.handshaken) judge_scoring(s, peer);
+    s.roster_dirty = true;
+    s.next_scoring_check = 0; // the host's own flag follows on the next tick
+    return *check ? "Players whose mods change scoring or physics are kept out of throwdowns and coop challenges."
+                  : "Mods that change scoring or physics are no longer checked.";
+}
+std::string edit_object_placement(Session &s, std::string_view argument) {
+    if (s.mode != Mode::host) return "Only the session host can change object placement.";
+    const auto policy = parse_object_placement(argument, s.object_placement);
+    if (!policy) return "Use everyone, host, nobody, or next for object placement.";
+    // Clients lock their editor and native tools when the roster arrives, but
+    // enforcement is the host freezing guest layouts (publish_guest_objects).
+    apply_object_placement(s, *policy);
+    s.roster_dirty = true;
+    load_host_preferences(s);
+    s.host_preferences.placement = *policy;
+    save_host_preferences(s);
+    return *policy == ObjectPlacement::everyone ? "Everyone can place and edit objects."
+         : *policy == ObjectPlacement::host_only ? "Only you can place objects. Guests' objects are frozen."
+                                                 : "Object placement is disabled for everyone. Existing objects stay.";
+}
+// Removes every guest's objects for everyone, whatever the placement policy.
+// The host's own objects are its saved park and are left alone.
+std::string clear_guest_objects(Session &s, std::string_view) {
+    if (s.mode != Mode::host) return "Only the session host can delete guest objects.";
+    std::size_t removed{};
+    for (auto &peer : active_peers(s)) {
+        if (!peer.handshaken) continue;
+        for (const auto *state : {&peer.objects, &peer.shared})
+            for (const auto &[id, object] : state->objects()) {
+                (void)object;
+                peer.cleared.insert(id);
+            }
+        removed += peer.shared.objects().size();
+        if (peer.shared.revision()) peer.shared.replace({});
+        peer.shared_from = peer.objects.revision();
+    }
+    s.object_clears = s.object_clears.value_or(0) + 1;
+    s.roster_dirty = true;
+    return removed ? "Deleted " + std::to_string(removed) + " guest object" + (removed == 1 ? "" : "s") + "."
+                   : "Guests have no placed objects to delete.";
+}
+std::string edit_party_overlay(Session &s, std::string_view argument) {
+    const auto enabled = parse_switch(argument, s.party_overlay);
+    if (!enabled) return "Use on, off, or toggle for the lobby party.";
+    s.party_overlay = *enabled;
+    s.display_preferences_loaded = true;
+    profile_runtime::set_local_preference("LobbyParty", s.party_overlay);
+    s.roster_dirty = true;
+    return s.party_overlay ? "Lobby party on: everyone in a lobby is in your game's party."
+                           : "Lobby party off: lobby players are not shown as your game's party.";
+}
+std::string edit_nametags(Session &s, std::string_view argument) {
+    const auto enabled = parse_switch(argument, s.nametags);
+    if (!enabled) return "Use on, off, or toggle for peer nametags.";
+    s.nametags = *enabled;
+    s.display_preferences_loaded = true;
+    apply_nametags(s);
+    profile_runtime::set_local_preference("Nametags", s.nametags);
+    return s.nametags ? "Peer nametags shown." : "Peer nametags hidden.";
+}
+std::string edit_nametag_style(Session &s, std::string_view argument) {
+    const auto custom = argument == "reskate" ? std::optional<bool>(true) : argument == "game" ? std::optional<bool>(false)
+                                                                          : parse_switch(argument, s.custom_nametags);
+    if (!custom) return "Use reskate, game, or toggle for the nametag style.";
+    s.custom_nametags = *custom;
+    s.display_preferences_loaded = true;
+    apply_nametags(s);
+    profile_runtime::set_local_preference("CustomNametags", s.custom_nametags);
+    return s.custom_nametags ? "ReSkate nametags: names, distances and dots." : "The game's own nametags.";
+}
+// Hidden chat still receives lines, so showing it again brings back the conversation.
+std::string edit_chat_visible(Session &s, std::string_view argument) {
+    const auto visible = parse_switch(argument, s.chat_visible);
+    if (!visible) return "Use on, off, or toggle for text chat.";
+    s.chat_visible = *visible;
+    profile_runtime::set_local_preference("ChatVisible", s.chat_visible);
+    publish_chat(s);
+    return s.chat_visible ? "Text chat shown." : "Text chat hidden.";
+}
+std::string edit_chat_filter(Session &s, std::string_view argument) {
+    const auto filter = parse_switch(argument, s.chat_filter);
+    if (!filter) return "Use on, off, or toggle for the chat filter.";
+    s.chat_filter = *filter;
+    profile_runtime::set_local_preference("ChatFilter", s.chat_filter);
+    publish_chat(s);
+    return s.chat_filter ? "Bad words in chat are hidden." : "Chat is shown unfiltered.";
+}
+std::string kick_player(Session &s, std::string_view argument) {
+    if (s.mode != Mode::host) return "Only the session host can kick players.";
+    const auto split = argument.find(' ');
+    if (split == std::string_view::npos) return "Select a connected player to kick.";
+    const auto identity = argument.substr(0, split), generation = argument.substr(split + 1);
+    std::uint64_t id{}, epoch{};
+    const auto parsed_id = std::from_chars(identity.data(), identity.data() + identity.size(), id);
+    const auto parsed_epoch = std::from_chars(generation.data(), generation.data() + generation.size(), epoch);
+    if (!id || !epoch || parsed_id.ec != std::errc{} || parsed_epoch.ec != std::errc{} ||
+        parsed_id.ptr != identity.data() + identity.size() || parsed_epoch.ptr != generation.data() + generation.size())
+        return "Select a connected player to kick.";
+    if (id == s.host_id) return "The host cannot kick themselves. Use Disconnect to end the session.";
+    const auto *peer = find_peer(s, id);
+    if (!peer || !peer->handshaken || peer->member.epoch != epoch)
+        return "That player left or rejoined. Select them from the current player list.";
+    const auto name = peer->member.name.empty() ? std::to_string(id) : peer->member.name;
+    s.banned.insert(id);
+    disconnect(s, id, "You were kicked by the session host.");
+    s.next_party_update = 0;
+    return name + " was kicked and cannot rejoin this session.";
+}
+// "ban <SteamID64> [name]": works with or without a session, so the list can be
+// managed any time; a banned player who is connected now is dropped at once.
+std::string ban_player(Session &s, std::string_view argument) {
+    const auto split = argument.find(' ');
+    const auto identity = argument.substr(0, split);
+    std::uint64_t id{};
+    const auto parsed = std::from_chars(identity.data(), identity.data() + identity.size(), id);
+    // Individual SteamID64s start at 76561197960265728 (universe 1, individual account).
+    if (parsed.ec != std::errc{} || parsed.ptr != identity.data() + identity.size() || id < 76561197960265728ULL ||
+        id > 76561202255233023ULL)
+        return "Enter a SteamID64: the 17-digit number starting 7656119.";
+    const auto local = s.transport.status().local_id;
+    if (id == local || (s.mode == Mode::host && id == s.host_id)) return "You cannot ban yourself.";
+    auto name = split == std::string_view::npos ? std::string{} : clean_chat_text(argument.substr(split + 1));
+    if (name.size() > 64) {
+        std::size_t cut = 64;
+        while (cut && (static_cast<unsigned char>(name[cut]) & 0xC0) == 0x80) --cut;
+        name.resize(cut);
+    }
+    const auto *peer = find_peer(s, id);
+    if (name.empty() && peer) name = peer->member.name;
+    load_bans(s);
+    if (is_banned(s, id)) return (name.empty() ? std::to_string(id) : name) + " is already banned.";
+    s.bans.push_back({id, name, static_cast<std::int64_t>(std::time(nullptr))});
+    s.ban_ids_dirty = true;
+    save_bans(s);
+    const auto label = name.empty() ? std::to_string(id) : name;
+    if (s.mode == Mode::host && peer && peer->handshaken) {
+        disconnect(s, id, "You were banned by the session host.");
+        s.next_party_update = 0;
+        return label + " was banned and removed from the session.";
+    }
+    return label + " is banned from lobbies you host.";
+}
+std::string unban_player(Session &s, std::string_view argument) {
+    std::uint64_t id{};
+    const auto parsed = std::from_chars(argument.data(), argument.data() + argument.size(), id);
+    if (parsed.ec != std::errc{} || parsed.ptr != argument.data() + argument.size()) return "Choose a banned player.";
+    load_bans(s);
+    const auto found = std::find_if(s.bans.begin(), s.bans.end(), [&](const auto &ban) { return ban.id == id; });
+    if (found == s.bans.end()) return "That player is not banned.";
+    const auto label = found->name.empty() ? std::to_string(id) : found->name;
+    s.bans.erase(found);
+    s.ban_ids_dirty = true;
+    save_bans(s);
+    // An unbanned player can also come back to the session they were kicked from.
+    s.banned.erase(id);
+    return label + " was unbanned.";
+}
+std::string edit_world_layer_sync(Session &s, std::string_view argument) {
+    if (s.mode != Mode::host) return "Only the session host can change world layer sync.";
+    const auto enabled = parse_switch(argument, s.force_world_layers);
+    if (!enabled) return "Use on, off, or toggle for world layer sync.";
+    s.force_world_layers = *enabled;
+    s.layers = local_profile_world_layers().choices;
+    s.roster_dirty = true;
+    load_host_preferences(s);
+    s.host_preferences.world_layer_sync = *enabled;
+    save_host_preferences(s);
+    return s.force_world_layers ? "Everyone now follows the host's world layer choices."
+                                : "World layer sync disabled. Guests regain their own layer choices.";
+}
+// Sends one setting change to the dedicated server this guest is an admin of.
+// The server answers in chat.
+std::string send_admin(Session &s, std::string text) {
+    auto *host = find_peer(s, s.host_id);
+    if (!host || !host->handshaken) return "Not connected to the server yet.";
+    if (!s.server_admin) return "You are not an admin on this server.";
+    auto request = packet(s, PacketKind::admin, now_us());
+    request.text = std::move(text);
+    if (request.text.size() > max_admin_text || !valid_admin_text(request.text)) return "That request is too long.";
+    if (!send_packet(s, s.host_id, request, true, false)) return "Could not reach the server.";
+    return "Sent to the server.";
+}
+} // namespace
+bool queue_command(std::string_view action, std::string_view argument, std::string_view password) {
+    if (launcher::offline_mode()) return false;
+    if ((action != "host" && action != "host-config" && action != "join" && action != "join-lobby" && action != "join-friend-lobby" && action != "stop" &&
+         action != "distances" && action != "object-placement" && action != "kick" && action != "clear-objects" &&
+         action != "party-overlay" && action != "nametags" && action != "nametag-style" && action != "chat-visible" && action != "chat-filter" &&
+         action != "voice" && action != "voice-mute" &&
+         action != "voice-volume" && action != "voice-allow" && action != "voice-range" && action != "chat" && action != "ban" && action != "unban" &&
+         action != "world-layer-sync" && action != "noclip-allow" && action != "nobail-allow" && action != "boosts-allow" &&
+         action != "tp" &&
+         action != "tpall" && action != "tphere" && action != "browse" &&
+         action != "server" && action != "party") ||
+        argument.size() > (action == "host" || action == "host-config" ? 160U : action == "chat" ? 4 * multiplayer_chat_max_bytes
+                           : action == "server" ? max_admin_text : 128U) ||
+        password.size() > 64)
+        return false;
+    auto &s = session();
+    auto request = std::make_unique<PrivateRequest>();
+    request->action = action;
+    request->argument = argument;
+    request->password = password;
+    request->queued = now_us();
+    std::lock_guard lock(s.request_mutex);
+    if (s.requests.size() >= 4)
+        return false;
+    s.requests.push_back(std::move(request));
+    return true;
+}
+std::string command(std::string_view action, std::string_view argument, std::string_view password) {
+    if (launcher::offline_mode()) return "Multiplayer is unavailable in offline mode. Start Steam and relaunch ReSkate.";
+    const bool configured_host = action == "host-config";
+    if (configured_host) action = "host";
+    PrivateRequest input;
+    input.password = password;
+    auto &s = session();
+    try {
+        // A dedicated server's admin changes the server's settings instead of
+        // their own: the same menu actions, sent to the server. "server" sends
+        // any server console command.
+        if (dedicated_host(s) && (action == "server" || (s.server_admin &&
+            (action == "distances" || action == "object-placement" || action == "voice-allow" || action == "voice-range" ||
+             action == "clear-objects" || action == "kick" || action == "ban" || action == "unban" ||
+             action == "world-layer-sync" || action == "noclip-allow" || action == "nobail-allow" ||
+             action == "tpall" || action == "tphere" || action == "boosts-allow" || action == "tuning-enforce")))) {
+            const auto text = action == "server" ? std::string(argument) : std::string(action) + " " + std::string(argument);
+            const auto result = send_admin(s, text);
+            if (result != "Sent to the server.") add_chat(s, 0, "Server", result);
+            return result;
+        }
+        if (action == "server") return "Server commands need a dedicated server session.";
+        if (action == "chat" && !argument.empty() && argument.front() == '/') {
+            // A command: /help and /tp run here; the rest (votes, admin commands) go to a
+            // dedicated server, which answers in chat.
+            const auto line = argument.substr(1);
+            const auto space = line.find(' ');
+            const auto verb = lowered(line.substr(0, space));
+            const auto rest = space == std::string_view::npos ? std::string_view{} : line.substr(space + 1);
+            std::string result;
+            if (verb.empty() || verb == "help" || verb == "?") {
+                for (const auto &c : chat_commands(s)) add_chat(s, 0, "ReSkate", c.usage + "  " + c.description);
+            } else if (verb == "tp") {
+                result = teleport_self(s, rest);
+                if (!result.empty()) add_chat(s, 0, "ReSkate", result);
+                return result;
+            } else if (!dedicated_host(s) && verb == "p") {
+                // In a lobby everyone is in the one party: party chat is chat.
+                const auto refused = send_chat(s, rest);
+                if (!refused.empty() && (s.mode == Mode::host || s.mode == Mode::join)) add_chat(s, 0, "ReSkate", refused);
+                return refused.empty() ? "Message sent." : refused;
+            } else if (!dedicated_host(s) && verb == "party") {
+                result = party_command(s, rest);
+            } else {
+                result = send_chat_command(s, argument);
+            }
+            if (!result.empty() && (s.mode == Mode::host || s.mode == Mode::join)) add_chat(s, 0, "ReSkate", result);
+            return result.empty() ? "Command sent." : result;
+        }
+        if (action == "chat") {
+            // The overlay queues chat and never sees this result, so a refusal
+            // is shown in the chat itself.
+            const auto refused = send_chat(s, argument);
+            if (!refused.empty() && (s.mode == Mode::host || s.mode == Mode::join)) add_chat(s, 0, "ReSkate", refused);
+            return refused.empty() ? "Message sent." : refused;
+        }
+        if (action == "party") {
+            const auto result = party_command(s, argument);
+            if (!result.empty() && (s.mode == Mode::host || s.mode == Mode::join)) add_chat(s, 0, "ReSkate", result);
+            publish(s);
+            return result.empty() ? "Sent to the server." : result;
+        }
+        if (action == "voice") {
+            VoiceSettings value;
+            int enabled{}, proximity{}, key{}, open_mic{};
+            std::uint32_t controller{};
+            float distance{}, volume{}, microphone{};
+            const auto number = [&](auto &target) {
+                const auto first = argument.find_first_not_of(" \t");
+                if (first == std::string_view::npos) return false;
+                argument.remove_prefix(first);
+                const auto token = argument.substr(0, argument.find_first_of(" \t"));
+                const auto result = std::from_chars(token.data(), token.data() + token.size(), target);
+                if (result.ec != std::errc{} || result.ptr != token.data() + token.size()) return false;
+                argument.remove_prefix(token.size());
+                return true;
+            };
+            if (!number(enabled) || !number(proximity) || !number(key) || !number(distance) || !number(volume) ||
+                !number(open_mic) || !number(controller) || !number(microphone) ||
+                argument.find_first_not_of(" \t") != std::string_view::npos ||
+                (enabled != 0 && enabled != 1) || (proximity != 0 && proximity != 1) ||
+                (open_mic != 0 && open_mic != 1)) return "Invalid voice settings.";
+            value.enabled = enabled != 0; value.proximity = proximity != 0;
+            value.push_to_talk = key; value.distance = distance; value.volume = volume;
+            value.open_mic = open_mic != 0; value.controller_combo = controller; value.microphone = microphone;
+            if (!value.valid()) return "Invalid voice key, distance or volume.";
+            s.voice_settings = value;
+            s.voice.configure(value);
+            publish(s);
+            return value.enabled ? (value.open_mic ? "Open microphone enabled." : "Push-to-talk voice enabled.") : "Voice chat disabled.";
+        }
+        if (action == "tp") return teleport_self(s, argument);
+        if (action == "tpall" || action == "tphere") return teleport_players(s, action, argument);
+        if (action == "voice-allow") {
+            if (s.mode != Mode::host) return "Only the host can change lobby voice permissions.";
+            if (argument != "on" && argument != "off") return "Choose on or off.";
+            const bool allowed = argument == "on";
+            if (s.voice_policy.allowed != allowed) {
+                s.voice_policy.allowed = allowed;
+                if (!++s.voice_policy.revision) ++s.voice_policy.revision;
+                s.voice.reset();
+                s.roster_dirty = true;
+            }
+            publish(s);
+            return allowed ? "Voice chat allowed for the lobby." : "Voice chat disabled for everyone.";
+        }
+        if (action == "voice-range") {
+            float range{};
+            const auto parsed = std::from_chars(argument.data(), argument.data() + argument.size(), range);
+            if (parsed.ec != std::errc{} || parsed.ptr != argument.data() + argument.size() || !valid_voice_range(range))
+                return "Choose a voice range from 50 to 1000 m.";
+            load_host_preferences(s);
+            s.host_preferences.voice_range = range;
+            save_host_preferences(s);
+            if (s.mode == Mode::host) s.voice_range = range;
+            publish(s);
+            return "Voice range set to " + std::to_string(static_cast<int>(range)) + " m.";
+        }
+        if (action == "voice-volume") {
+            const auto split = argument.find(' ');
+            if (split == std::string_view::npos) return "Choose a player and volume.";
+            std::uint64_t id{};
+            float volume{};
+            const auto player = std::from_chars(argument.data(), argument.data() + split, id);
+            const auto gain = std::from_chars(argument.data() + split + 1, argument.data() + argument.size(), volume);
+            if (player.ec != std::errc{} || player.ptr != argument.data() + split || !find_peer(s, id) ||
+                gain.ec != std::errc{} || gain.ptr != argument.data() + argument.size() || !valid_voice_volume(volume))
+                return "Choose a connected player and a volume from 0 to 10.";
+            s.voice.volume(id, volume);
+            publish(s);
+            return "Player voice volume updated.";
+        }
+        if (action == "voice-mute") {
+            const auto split = argument.find(' ');
+            if (split == std::string_view::npos) return "Choose a player to mute.";
+            std::uint64_t id{};
+            const auto result = std::from_chars(argument.data(), argument.data() + split, id);
+            const auto enabled = argument.substr(split + 1);
+            if (result.ec != std::errc{} || result.ptr != argument.data() + split || !find_peer(s, id) ||
+                (enabled != "on" && enabled != "off")) return "Choose a connected player to mute.";
+            s.voice.mute(id, enabled == "on");
+            publish(s);
+            return enabled == "on" ? "Player voice muted." : "Player voice unmuted.";
+        }
+        // Host-only settings check the mode themselves; guests get a refusal.
+        using Setting = std::string (*)(Session &, std::string_view);
+        static constexpr std::pair<std::string_view, Setting> settings[] = {
+            {"object-placement", edit_object_placement}, {"kick", kick_player},
+            {"noclip-allow", edit_guest_noclip},           {"nobail-allow", edit_guest_no_bail},
+            {"boosts-allow", edit_guest_boosts},           {"tuning-enforce", edit_enforce_tuning},
+            {"score-check", edit_score_check},
+            {"ban", ban_player},                           {"unban", unban_player},
+            {"clear-objects", clear_guest_objects},
+            {"world-layer-sync", edit_world_layer_sync},   {"distances", edit_distances},
+            {"party-overlay", edit_party_overlay},         {"nametags", edit_nametags},
+            {"nametag-style", edit_nametag_style},
+            {"chat-visible", edit_chat_visible}, {"chat-filter", edit_chat_filter}};
+        for (const auto &[name, edit] : settings)
+            if (action == name) {
+                s.status = edit(s, argument);
+                publish(s);
+                return s.status;
+            }
+        if (action == "status")
+            return s.status + " | Players " + std::to_string(player_count(s)) + "/" +
+                   std::to_string(s.capacity);
+        if (action == "stop") {
+            stop(s, "Multiplayer stopped.");
+            publish(s);
+            return s.status;
+        }
+        if (action == "retry") {
+            each_peer([&] {
+                auto &p = s.peers[peer_slot];
+                update_player_ui(s.base, nullptr, {});
+                remove_remote(s.base);
+                p.render_failed = false;
+                p.far_interval = 0;
+                p.last_cosmetic_apply = 0;
+            });
+            s.status = "Retrying remote skater creation.";
+            publish(s);
+            return s.status;
+        }
+        if (action == "browse") {
+            if (!s.transport.open())
+                s.status = s.transport.status().detail;
+            else {
+                s.lobbies.refresh(now_us());
+                s.servers.refresh(now_us());
+            }
+            publish(s);
+            return s.lobbies.status().browser;
+        }
+        if (action == "join-lobby" || action == "join-friend-lobby") {
+            if (s.mode != Mode::off) {
+                s.status = "Leave your current session before joining another lobby.";
+                publish(s);
+                return s.status;
+            }
+            if (s.lobbies.status().joining)
+                return "A lobby join is already in progress.";
+            std::uint64_t id{};
+            const auto result = std::from_chars(argument.data(), argument.data() + argument.size(), id);
+            if (result.ec != std::errc{} || result.ptr != argument.data() + argument.size() || !id)
+                return "Invalid lobby selection. Refresh the browser.";
+            // A dedicated server's row carries its join code.
+            if (const auto *server = s.servers.find(id)) {
+                const auto code = server->code;
+                return command("join", code, input.password);
+            }
+            if (!s.transport.open())
+                return s.transport.status().detail;
+            if (action == "join-friend-lobby")
+                s.lobbies.join_friend(id, s.transport.status().local_id, now_us());
+            else
+                s.lobbies.join(id, s.transport.status().local_id, now_us());
+            erase_password(s.lobby_password);
+            if (s.lobbies.status().joining)
+                s.lobby_password = input.password;
+            publish(s);
+            return s.lobbies.status().browser;
+        }
+        if (action == "test") {
+            s.transport.socket_test();
+            s.status = s.transport.status().detail;
+            publish(s);
+            return s.status;
+        }
+        if (action != "host" && action != "join" && action != "echo")
+            return "Unknown multiplayer action.";
+        unsigned capacity = multiplayer_lobby_player_limit;
+        unsigned tps = multiplayer_default_tps;
+        std::string_view lobby_name;
+        auto visibility = argument;
+        if (action == "host") {
+            const auto space = argument.find(' ');
+            if (space != std::string_view::npos) {
+                visibility = argument.substr(0, space);
+                const auto options = argument.substr(space + 1);
+                const auto name_start = options.find(' ');
+                const auto number = options.substr(0, name_start);
+                if (name_start != std::string_view::npos) lobby_name = options.substr(name_start + 1);
+                const auto result = std::from_chars(number.data(), number.data() + number.size(), capacity);
+                if (result.ec != std::errc{} || result.ptr != number.data() + number.size() || capacity < 2 ||
+                    capacity > multiplayer_lobby_player_limit)
+                    return "Choose a player limit from 2 to " + std::to_string(multiplayer_lobby_player_limit) + ".";
+            }
+            if (!visibility.empty() && visibility != "code" && visibility != "public")
+                return "Use mp host code <limit> [lobby name] or mp host public <limit> [lobby name].";
+            if (configured_host) {
+                const auto split = lobby_name.find(' ');
+                const auto rate = lobby_name.substr(0, split);
+                const auto result = std::from_chars(rate.data(), rate.data() + rate.size(), tps);
+                if (result.ec != std::errc{} || result.ptr != rate.data() + rate.size() || !valid_multiplayer_tps(tps))
+                    return "Choose 20, 30, 60, or 120 TPS before hosting.";
+                lobby_name = split == std::string_view::npos ? std::string_view{} : lobby_name.substr(split + 1);
+            }
+            const auto first = lobby_name.find_first_not_of(' ');
+            lobby_name = first == std::string_view::npos ? std::string_view{}
+                : lobby_name.substr(first, lobby_name.find_last_not_of(' ') - first + 1);
+            if (lobby_name.size() > 128 || std::any_of(lobby_name.begin(), lobby_name.end(),
+                [](unsigned char c) { return c < 32 || c == 127; }))
+                return "Lobby names must be at most 128 bytes with no control characters.";
+        }
+        std::optional<Invite> invitation;
+        if (action == "join") {
+            invitation = parse_invite(argument);
+            if (!invitation)
+                return "Invalid join code. Paste the complete SteamID-session code from the host.";
+        }
+        stop(s, "Starting multiplayer...");
+        s.chat.clear(); // A new session starts with an empty chat.
+        s.tps = tps;
+        s.capacity = capacity;
+        s.epoch = nonce();
+        s.secret = invitation ? invitation->secret : nonce();
+        if (action != "echo")
+            s.password = password_key(input.password, s.secret);
+        if (action == "echo") {
+            s.mode = Mode::echo;
+            s.peers[0].member = {1, s.epoch, "Local Echo"};
+            s.peers[0].handshaken = true;
+            note_slot(s, 0);
+            s.status = "Local Echo: a delayed copy follows your recorded path at " + std::to_string(s.tps) + " TPS.";
+        } else if (action == "host") {
+            if (!s.transport.host(capacity)) {
+                s.status = s.transport.status().detail;
+                publish(s);
+                return s.status;
+            }
+            s.mode = Mode::host;
+            s.host_id = s.transport.status().local_id;
+            s.lobby_name = lobby_name.empty() ? s.transport.name(s.host_id) : std::string(lobby_name);
+            if (s.lobby_name.empty()) s.lobby_name = "ReSkate session";
+            s.invite = format_invite({s.host_id, s.secret});
+            s.public_host = visibility == "public";
+            if (s.public_host)
+                s.lobbies.host(s.invite, capacity, s.password.has_value(), s.lobby_name);
+            // Remember this setup, and bring back the host options chosen last time.
+            load_host_preferences(s);
+            auto &remembered = s.host_preferences;
+            remembered.public_lobby = s.public_host;
+            remembered.capacity = capacity;
+            remembered.tps = tps;
+            remembered.lobby_name = std::string(lobby_name);
+            remembered.password_required = s.password.has_value();
+            apply_distances(s, remembered.distances);
+            s.voice_range = remembered.voice_range;
+            apply_object_placement(s, remembered.placement);
+            apply_guest_tools(s, remembered.guest_noclip, remembered.guest_no_bail, remembered.guest_boosts);
+            s.enforce_tuning = remembered.enforce_tuning;
+            s.score_check = remembered.score_check;
+            if (remembered.world_layer_sync) {
+                s.force_world_layers = true;
+                s.layers = local_profile_world_layers().choices;
+            }
+            s.roster_dirty = true;
+            save_host_preferences(s);
+            s.status = "Hosting for up to " + std::to_string(capacity) + " players at " + std::to_string(s.tps) + " TPS.";
+        } else {
+            if (!s.transport.join(invitation->steam_id)) {
+                s.status = s.transport.status().detail;
+                publish(s);
+                return s.status;
+            }
+            s.mode = Mode::join;
+            // Wait for the authenticated host's initial policy.
+            apply_object_placement(s, ObjectPlacement::nobody);
+            s.world = 0;
+            s.host_id = invitation->steam_id;
+            s.awaiting_map = true;
+            s.join_started = now_us();
+            s.status = "Connecting and checking the host's map...";
+        }
+        set_lobby_park_mode(s.mode == Mode::host || s.mode == Mode::join, s.mode == Mode::join);
+        set_lobby_object_guest(s.mode == Mode::join);
+        publish(s);
+        return s.status;
+    } catch (const std::exception &e) {
+        stop(s, e.what());
+        publish(s);
+        return s.status;
+    }
+}
+} // namespace dingosdk::multiplayer

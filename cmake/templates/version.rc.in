@@ -1,0 +1,30 @@
+#include <winver.h>
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION @version_major@,@version_minor@,@version_patch@,0
+ PRODUCTVERSION @version_major@,@version_minor@,@version_patch@,0
+ FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+ FILEFLAGS 0x0L
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE @version_file_type@
+ FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "Dingo Shenanigans"
+            VALUE "FileDescription", "@version_description@"
+            VALUE "FileVersion", "@DINGOSDK_VERSION@"
+            VALUE "InternalName", "@version_internal_name@"
+            VALUE "LegalCopyright", "Copyright (C) 2026 the ReSkate contributors. Licensed under GPL-3.0."
+            VALUE "OriginalFilename", "@version_file_name@"
+            VALUE "ProductName", "ReSkate"
+            VALUE "ProductVersion", "@DINGOSDK_VERSION@"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

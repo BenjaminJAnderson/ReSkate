@@ -1,0 +1,225 @@
+#include "steam_server_browser.h"
+#include "Extension/Multiplayer/Net/protocol.h"
+#include "Engine/Core/Log/logging.h"
+#include "Engine/Core/Text/word_filter.h"
+#include <Windows.h>
+#include <algorithm>
+#include <atomic>
+#include <map>
+#include <charconv>
+#include <cstring>
+
+namespace dingosdk::multiplayer {
+namespace {
+constexpr std::uint32_t skate_app = 3354750;
+template <class T> T symbol(HMODULE module, const char *name) {
+#pragma warning(push)
+#pragma warning(disable : 4191)
+    return reinterpret_cast<T>(GetProcAddress(module, name));
+#pragma warning(pop)
+}
+// matchmakingtypes.h (CSteamID is pack(1) there, so the ID is unaligned).
+#pragma pack(push, 1)
+struct PackedSteamId {
+    std::uint64_t value;
+};
+#pragma pack(pop)
+struct ServerItem {
+    std::uint16_t connection_port, query_port;
+    std::uint32_t ip;
+    int ping;
+    bool had_successful_response, do_not_refresh;
+    char game_dir[32], map[32], description[64];
+    std::uint32_t app_id;
+    int players, max_players, bots;
+    bool password, secure;
+    std::uint32_t time_last_played;
+    int server_version;
+    char name[64], tags[128];
+    PackedSteamId steam_id;
+};
+static_assert(sizeof(ServerItem) == 372);
+struct Filter {
+    char key[256], value[256];
+};
+// ISteamMatchmakingServerListResponse. Steam calls it from the game's own
+// callback pump, on whichever thread that runs; rows are read by polling
+// GetServerDetails instead, so it only records completion.
+class Response {
+  public:
+    virtual void ServerResponded(void *, int) {}
+    virtual void ServerFailedToRespond(void *, int) {}
+    virtual void RefreshComplete(void *, int) { done = true; }
+    std::atomic<bool> done{};
+};
+struct Api {
+    HMODULE module{};
+    void *(*servers)(){};
+    void *(*request)(void *, std::uint32_t, Filter **, std::uint32_t, Response *){};
+    void *(*lan)(void *, std::uint32_t, Response *){};
+    ServerItem *(*details)(void *, void *, int){};
+    int (*count)(void *, void *){};
+    bool (*refreshing)(void *, void *){};
+    void (*release)(void *, void *){};
+    bool open() {
+        if (module) return servers != nullptr;
+        module = GetModuleHandleW(L"steam_api64.dll");
+        if (!module) return false;
+        servers = symbol<decltype(servers)>(module, "SteamAPI_SteamMatchmakingServers_v002");
+        request = symbol<decltype(request)>(module, "SteamAPI_ISteamMatchmakingServers_RequestInternetServerList");
+        lan = symbol<decltype(lan)>(module, "SteamAPI_ISteamMatchmakingServers_RequestLANServerList");
+        details = symbol<decltype(details)>(module, "SteamAPI_ISteamMatchmakingServers_GetServerDetails");
+        count = symbol<decltype(count)>(module, "SteamAPI_ISteamMatchmakingServers_GetServerCount");
+        refreshing = symbol<decltype(refreshing)>(module, "SteamAPI_ISteamMatchmakingServers_IsRefreshing");
+        release = symbol<decltype(release)>(module, "SteamAPI_ISteamMatchmakingServers_ReleaseRequest");
+        if (!request || !details || !count || !refreshing || !release) servers = nullptr;
+        return servers != nullptr;
+    }
+};
+Api &api() {
+    static Api value;
+    return value;
+}
+std::string bounded(const char *text, std::size_t size) {
+    std::size_t length{};
+    while (length < size && text[length]) ++length;
+    return std::string(text, length);
+}
+} // namespace
+
+std::optional<MultiplayerLobby> read_server_tags(std::string_view tags, std::uint64_t steam_id) {
+    if (!game_server_steam_id(steam_id)) return {};
+    MultiplayerLobby row;
+    row.id = row.owner = steam_id;
+    row.dedicated = true;
+    bool reskate{}, version{};
+    std::uint64_t secret{};
+    const auto integer = [](std::string_view text, int &out) {
+        const auto result = std::from_chars(text.data(), text.data() + text.size(), out);
+        return result.ec == std::errc{} && result.ptr == text.data() + text.size();
+    };
+    while (!tags.empty()) {
+        const auto comma = tags.find(',');
+        const auto tag = tags.substr(0, comma);
+        tags = comma == std::string_view::npos ? std::string_view{} : tags.substr(comma + 1);
+        if (tag == "reskate") { reskate = true; continue; }
+        if (tag.empty()) continue;
+        const auto value = tag.substr(1);
+        switch (tag[0]) {
+        case 'v': version = value == std::to_string(protocol_version); break;
+        case 'k': {
+            const auto result = std::from_chars(value.data(), value.data() + value.size(), secret, 16);
+            if (result.ec != std::errc{} || result.ptr != value.data() + value.size()) secret = 0;
+            break;
+        }
+        case 'p': if (!integer(value, row.players)) row.players = 0; break;
+        case 'c': if (!integer(value, row.capacity)) row.capacity = 0; break;
+        case 'w': row.password_required = value == "1"; break;
+        case 'm': row.map = std::string(value); break;
+        // The name is last and may itself contain anything but commas.
+        case 'n': row.name = std::string(value) + (tags.empty() ? "" : "," + std::string(tags)); tags = {}; break;
+        default: break;
+        }
+    }
+    if (!reskate || !version || !secret || row.capacity < 1) return {};
+    row.code = format_invite({steam_id, secret});
+    if (row.name.empty()) row.name = "ReSkate server";
+    return row;
+}
+
+SteamServerBrowser::~SteamServerBrowser() { release(); }
+void SteamServerBrowser::release() {
+    for (auto &search : searches_) {
+        if (search.request && api().release) api().release(servers_, search.request);
+        delete static_cast<Response *>(search.response);
+    }
+    searches_.clear();
+}
+const MultiplayerLobby *SteamServerBrowser::find(std::uint64_t id) const {
+    for (const auto &row : rows_)
+        if (row.id == id) return &row;
+    return nullptr;
+}
+void SteamServerBrowser::refresh(std::uint64_t now) {
+    if (!api().open()) return;
+    servers_ = api().servers();
+    if (!servers_) return;
+    release();
+    found_.clear();
+    // The internet list, filtered by Steam on the tags; and the LAN list, whose
+    // servers answer directly (live map and ping) and show up at once.
+    static Filter filter{"gametagsand", {}};
+    const auto wanted = "reskate,v" + std::to_string(protocol_version);
+    std::memcpy(filter.value, wanted.c_str(), wanted.size() + 1);
+    Filter *filters[] = {&filter};
+    for (const bool lan : {false, true}) {
+        auto *response = new Response;
+        void *request = lan ? (api().lan ? api().lan(servers_, skate_app, response) : nullptr)
+                            : api().request(servers_, skate_app, filters, 1, response);
+        if (request) searches_.push_back({request, response});
+        else delete response;
+    }
+    started_ = now;
+    next_poll_ = now;
+}
+void SteamServerBrowser::read() {
+    for (const auto &search : searches_) {
+        const int count = api().count(servers_, search.request);
+        for (int i = 0; i < count && i < 512; ++i) {
+            const auto *item = api().details(servers_, search.request, i);
+            if (!item) continue;
+            auto row = read_server_tags(bounded(item->tags, sizeof item->tags), item->steam_id.value);
+            if (!row) continue;
+            auto &entry = found_[row->id];
+            // A direct answer is live; the tags come from Steam's master list, which
+            // can lag behind a change of map.
+            const bool answered = item->had_successful_response;
+            if (answered) {
+                if (const auto name = bounded(item->name, sizeof item->name); !name.empty()) row->name = name;
+                if (const auto map = bounded(item->map, sizeof item->map); !map.empty()) row->map = map;
+                row->ping = item->ping;
+            }
+            if (answered || !entry.answered) {
+                entry.row = std::move(*row);
+                entry.answered = answered;
+            }
+            const std::pair address{item->ip, item->connection_port};
+            if (item->ip && std::find(entry.addresses.begin(), entry.addresses.end(), address) == entry.addresses.end())
+                entry.addresses.push_back(address);
+        }
+    }
+    // A restarted server gets a new, higher Steam ID, while Steam lists the old
+    // one for a while. Only one can hold an address and port: keep the newest.
+    // Servers named with bad words are never shown (they refuse to list themselves too).
+    std::vector<MultiplayerLobby> rows;
+    for (const auto &[id, entry] : found_) {
+        if (text::contains_bad_words(entry.row.name)) continue;
+        const bool replaced = std::any_of(found_.begin(), found_.end(), [&](const auto &other) {
+            return other.first > id && std::any_of(entry.addresses.begin(), entry.addresses.end(), [&](const auto &a) {
+                return std::find(other.second.addresses.begin(), other.second.addresses.end(), a) != other.second.addresses.end();
+            });
+        });
+        if (!replaced) rows.push_back(entry.row);
+    }
+    rows_ = std::move(rows);
+}
+void SteamServerBrowser::tick(std::uint64_t now) {
+    if (searches_.empty() || now < next_poll_) return;
+    next_poll_ = now + 250000;
+    read();
+    // Pings of servers behind a NAT never answer; stop waiting after 15 s.
+    const bool done = std::all_of(searches_.begin(), searches_.end(), [&](const auto &search) {
+        return static_cast<Response *>(search.response)->done ||
+               (now - started_ > 1000000 && !api().refreshing(servers_, search.request));
+    }) || now - started_ > 15000000;
+    if (done) {
+        release();
+        std::string list;
+        for (const auto &row : rows_)
+            list += (list.empty() ? ": " : "; ") + row.name + " (" + row.map + ", " + std::to_string(row.players) + "/" +
+                    std::to_string(row.capacity) + (row.ping >= 0 ? ", " + std::to_string(row.ping) + " ms" : std::string{}) + ")";
+        logging::log(logging::Level::info, logging::Channel::runtime, "Server browser: {} ReSkate server{} found{}.",
+                     rows_.size(), rows_.size() == 1 ? "" : "s", list);
+    }
+}
+} // namespace dingosdk::multiplayer

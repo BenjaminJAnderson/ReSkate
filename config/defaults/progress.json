@@ -1,0 +1,174 @@
+{
+  "quests": {
+    "Ent_Intro_Q03_A": 5,
+    "Ent_Intro_Q03_B": 5
+  },
+  "play_events": {
+    "Ent_Intro_Q01_Set:start": {
+      "context": "",
+      "timestamp": 0,
+      "count": 1
+    },
+    "Ent_Intro_Q01_Set:complete": {
+      "context": "",
+      "timestamp": 0,
+      "count": 1
+    },
+    "Ent_Intro_Q02_Set:start": {
+      "context": "",
+      "timestamp": 0,
+      "count": 1
+    },
+    "Ent_Intro_Q02_Set:complete": {
+      "context": "",
+      "timestamp": 0,
+      "count": 1
+    },
+    "Ent_Intro_Q02_LineChallenge:start": {
+      "context": "",
+      "timestamp": 0,
+      "count": 1
+    },
+    "Ent_Intro_Q02_LineChallenge:complete": {
+      "context": "",
+      "timestamp": 0,
+      "count": 1
+    },
+    "StoreOnboardingSet:start": {
+      "context": "",
+      "timestamp": 0,
+      "count": 1
+    },
+    "StoreOnboardingSet:complete": {
+      "context": "",
+      "timestamp": 0,
+      "count": 1
+    },
+    "CRASOnboardingSet:start": {
+      "context": "",
+      "timestamp": 0,
+      "count": 1
+    },
+    "CRASOnboardingSet:complete": {
+      "context": "",
+      "timestamp": 0,
+      "count": 1
+    },
+    "QuestSelectionOnboardingSet:start": {
+      "context": "",
+      "timestamp": 0,
+      "count": 1
+    },
+    "QuestSelectionOnboardingSet:complete": {
+      "context": "",
+      "timestamp": 0,
+      "count": 1
+    },
+    "FirstQuestCompletedOnboardingSet:start": {
+      "context": "",
+      "timestamp": 0,
+      "count": 1
+    },
+    "FirstQuestCompletedOnboardingSet:complete": {
+      "context": "",
+      "timestamp": 0,
+      "count": 1
+    },
+    "SecondQuestCompletedOnboardingSet:start": {
+      "context": "",
+      "timestamp": 0,
+      "count": 1
+    },
+    "SecondQuestCompletedOnboardingSet:complete": {
+      "context": "",
+      "timestamp": 0,
+      "count": 1
+    },
+    "RankUp_1_OnboardingSet:start": {
+      "context": "",
+      "timestamp": 0,
+      "count": 1
+    },
+    "RankUp_1_OnboardingSet:complete": {
+      "context": "",
+      "timestamp": 0,
+      "count": 1
+    },
+    "RankUpOnboardingSet:start": {
+      "context": "",
+      "timestamp": 0,
+      "count": 1
+    },
+    "RankUpOnboardingSet:complete": {
+      "context": "",
+      "timestamp": 0,
+      "count": 1
+    },
+    "RankUnlockedOnboardingSet:start": {
+      "context": "",
+      "timestamp": 0,
+      "count": 1
+    },
+    "RankUnlockedOnboardingSet:complete": {
+      "context": "",
+      "timestamp": 0,
+      "count": 1
+    },
+    "SteeringCourse:start": {
+      "context": "",
+      "timestamp": 0,
+      "count": 1
+    },
+    "SteeringCourse:complete": {
+      "context": "",
+      "timestamp": 0,
+      "count": 1
+    },
+    "OllieCourse:start": {
+      "context": "",
+      "timestamp": 0,
+      "count": 1
+    },
+    "OllieCourse:complete": {
+      "context": "",
+      "timestamp": 0,
+      "count": 1
+    },
+    "GrindCourse:start": {
+      "context": "",
+      "timestamp": 0,
+      "count": 1
+    },
+    "GrindCourse:complete": {
+      "context": "",
+      "timestamp": 0,
+      "count": 1
+    },
+    "FlipTrickCourse:start": {
+      "context": "",
+      "timestamp": 0,
+      "count": 1
+    },
+    "FlipTrickCourse:complete": {
+      "context": "",
+      "timestamp": 0,
+      "count": 1
+    },
+    "GoToCity:start": {
+      "context": "",
+      "timestamp": 0,
+      "count": 1
+    },
+    "GoToCity:complete": {
+      "context": "",
+      "timestamp": 0,
+      "count": 1
+    }
+  },
+  "neighborhood_ranks": {},
+  "rip_score": {
+    "value": 100000,
+    "cap": 100000,
+    "level": 100
+  }
+}

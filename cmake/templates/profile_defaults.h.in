@@ -1,0 +1,5 @@
+#pragma once
+// Generated from the corresponding config JSON at configure time.
+namespace dingosdk::embedded {
+inline constexpr unsigned char embedded_profile_defaults[]{@DINGOSDK_DEFAULTS_BYTES@};
+}

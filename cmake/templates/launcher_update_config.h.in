@@ -1,0 +1,8 @@
+#pragma once
+
+namespace dingosdk::launcher_update {
+inline constexpr bool launcher_binary_updates = @launcher_binary_updates@;
+
+// Public GitHub releases source ("owner/repo"): launcher.json in its latest release.
+inline constexpr wchar_t launcher_release_repo[] = L"@launcher_release_repo@";
+}

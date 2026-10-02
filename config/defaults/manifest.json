@@ -1,0 +1,12 @@
+{
+  "base": "profile.json",
+  "sections": {
+    "options": "options.json",
+    "progress": "progress.json",
+    "settings": "settings.json",
+    "object_dropper": "object-dropper.json",
+    "news": "news.json",
+    "challenges": "challenges.json",
+    "location_travel": "location-travel.json"
+  }
+}

@@ -1,0 +1,306 @@
+#include "multiplayer_menu_internal.h"
+#include "Engine/Game/World/world_names.h"
+#include <algorithm>
+#include <atomic>
+#include <cstdio>
+#include <Windows.h>
+
+namespace dingosdk::overlay {
+namespace {
+std::atomic<MultiplayerQueue> private_queue{};
+}
+void set_multiplayer_queue(MultiplayerQueue value) noexcept { private_queue.store(value); }
+} // namespace dingosdk::overlay
+
+namespace dingosdk::overlay::detail {
+bool queue_multiplayer_action(const char* action, const std::string& argument) {
+    const auto callback = private_queue.load();
+    std::array<char, 256> result{};
+    return callback && callback(action, argument.c_str(), "", result.data(), result.size());
+}
+} // namespace dingosdk::overlay::detail
+
+namespace dingosdk::overlay::menu::multiplayer_detail {
+bool send_private(SkateMenu &menu, const char *action, const std::string &argument,
+                  std::array<char, 65> &password, bool use_password) {
+    const auto callback = private_queue.load();
+    std::array<char, 512> result{};
+    if (!callback) {
+        feedback(menu, "Multiplayer dispatcher unavailable.");
+        return false;
+    }
+    const bool accepted =
+        callback(action, argument.c_str(), use_password ? password.data() : "", result.data(), result.size());
+    result.back() = 0;
+    feedback(menu, result.data());
+    if (accepted)
+        SecureZeroMemory(password.data(), password.size());
+    return accepted;
+}
+std::string map_label(const Model &model, std::string_view path) {
+    return world_destination_name(path, model.levels);
+}
+void cell_text(const std::string &text) {
+    const float width = std::max(1.f, ImGui::GetContentRegionAvail().x);
+    const char *first = text.data(), *last = first + text.size();
+    const bool clipped = ImGui::CalcTextSize(first, last).x > width;
+    if (clipped) {
+        const float dots = ImGui::CalcTextSize("...").x;
+        while (last > first && ImGui::CalcTextSize(first, last).x + dots > width) {
+            --last;
+            while (last > first && (static_cast<unsigned char>(*last) & 0xc0) == 0x80)
+                --last;
+        }
+        ImGui::Text("%.*s...", static_cast<int>(last - first), first);
+    } else
+        ImGui::TextUnformatted(first, last);
+    if (clipped && ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", text.c_str());
+}
+} // namespace dingosdk::overlay::menu::multiplayer_detail
+
+namespace dingosdk::overlay::menu {
+using namespace multiplayer_detail;
+namespace {
+void host_page(SkateMenu &menu, const Model &model, const CallbacksV3 &) {
+    const auto &mp = model.multiplayer;
+    if (!menu.multiplayer_host_seeded && mp.saved_host.loaded) {
+        // Start from the settings used last time (the password is never saved).
+        const auto &saved = mp.saved_host;
+        menu.multiplayer_host_seeded = true;
+        menu.multiplayer_visibility = saved.public_lobby ? 1 : 0;
+        menu.multiplayer_capacity = saved.capacity;
+        menu.multiplayer_tps = saved.tps;
+        menu.multiplayer_password_enabled = saved.password_required;
+        menu.multiplayer_lobby_name.fill(0);
+        std::copy_n(saved.lobby_name.begin(), std::min(saved.lobby_name.size(), menu.multiplayer_lobby_name.size() - 1),
+                    menu.multiplayer_lobby_name.begin());
+    }
+    const bool editable = !mp.active && !mp.lobby_joining;
+    int visibility = mp.hosting ? (mp.public_host ? 1 : 0) : menu.multiplayer_visibility;
+    int capacity = mp.hosting ? mp.capacity : menu.multiplayer_capacity;
+    unsigned tps = mp.hosting ? mp.tps : menu.multiplayer_tps;
+    bool locked = mp.hosting ? mp.password_required : menu.multiplayer_password_enabled;
+
+    begin_card(menu, "host-access", "WHO CAN JOIN");
+    choice(menu, "visibility", visibility, {"Join code only", "Public lobby"}, editable);
+    menu.multiplayer_visibility = visibility;
+    note(visibility == 0 ? "Unlisted. Friends join with the code you share from Session."
+                         : "Listed in the Servers browser. Anyone on a compatible build can join.");
+    end_card();
+
+    begin_card(menu, "host-settings", "LOBBY SETTINGS");
+    info(menu, "Map", map_label(model, mp.map));
+    ImGui::BeginDisabled(!editable);
+    field(menu, "Lobby name");
+    const auto name_hint = mp.local_name.empty() ? std::string("Your Steam name") : mp.local_name + " (your Steam name)";
+    ImGui::InputTextWithHint("##lobby-name", name_hint.c_str(), menu.multiplayer_lobby_name.data(),
+                             menu.multiplayer_lobby_name.size());
+    field(menu, "Player limit", "Includes you.");
+    ImGui::SliderInt("##player-limit", &capacity, 2, multiplayer_lobby_player_limit, "%d players");
+    menu.multiplayer_capacity = capacity;
+    field(menu, "Update rate",
+          "How often nearby skaters update. Higher is smoother but uses more upload bandwidth.");
+    if (ImGui::BeginCombo("##tps", (std::to_string(tps) + " TPS").c_str())) {
+        for (const auto rate : multiplayer_tick_rates) {
+            if (ImGui::Selectable((std::to_string(rate) + " TPS").c_str(), rate == tps)) tps = rate;
+            if (rate == tps) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+    menu.multiplayer_tps = tps;
+    ImGui::EndDisabled();
+    ImGui::Dummy(ImVec2(0, px(2)));
+    toggle_row(menu, "Require password", "Players must enter a password to join.", locked, editable, locked ? "ON" : "OFF");
+    menu.multiplayer_password_enabled = locked;
+    if (locked && !mp.hosting) {
+        field(menu, "Password");
+        ImGui::InputTextWithHint("##host-password", "Choose a lobby password", menu.multiplayer_host_password.data(),
+                                 menu.multiplayer_host_password.size(), ImGuiInputTextFlags_Password);
+    }
+    const auto rates = "Nearby players update at " + std::to_string(tps) + " TPS; distant players at 10 and 5 TPS.";
+    note(rates.c_str());
+    end_card();
+
+    if (!mp.hosting) {
+        if (primary_button(menu, visibility ? "HOST PUBLIC LOBBY" : "HOST WITH JOIN CODE",
+                           editable && mp.local_ready)) {
+            if (locked && !menu.multiplayer_host_password[0])
+                feedback(menu, "Enter a password or turn off Require password.");
+            else
+                send_private(menu, "host-config",
+                             std::string(visibility ? "public " : "code ") + std::to_string(capacity) + " " +
+                                 std::to_string(tps) + " " + menu.multiplayer_lobby_name.data(),
+                             menu.multiplayer_host_password, locked);
+        }
+        if (!mp.local_ready) warn("Load a map before hosting.");
+        else if (mp.active) warn("Leave your current session before hosting.");
+    }
+    if (!mp.lobby_status.empty()) note(mp.lobby_status.c_str());
+}
+std::string number(unsigned long long value) { return std::to_string(value); }
+std::string decimal(double value, int digits = 1) {
+    std::array<char, 64> text{};
+    std::snprintf(text.data(), text.size(), "%.*f", digits, value);
+    return text.data();
+}
+void debug_page(SkateMenu &menu, const MultiplayerModel &mp, const CallbacksV3 &callbacks) {
+    begin_card(menu, "local-test", "LOCAL TEST");
+    note("Local Echo replays your skater, board, cosmetics and sound with a short delay, on this PC only.");
+    ImGui::BeginDisabled(mp.active || mp.lobby_joining || !mp.local_ready);
+    if (ImGui::Button("Start Local Echo", ImVec2(-FLT_MIN, 0)))
+        send_console(menu, callbacks, "mp echo");
+    ImGui::EndDisabled();
+    const float half = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * .5f;
+    if (ImGui::Button("Test Steam transport", ImVec2(half, 0)))
+        send_console(menu, callbacks, "mp test");
+    ImGui::SameLine();
+    if (ImGui::Button("Retry remote skater", ImVec2(-FLT_MIN, 0)))
+        send_console(menu, callbacks, "mp retry");
+    for (const auto *detail : {&mp.native_status, &mp.player_ui_status, &mp.cosmetic_status, &mp.audio_status})
+        if (!detail->empty()) note(detail->c_str());
+    end_card();
+
+    begin_card(menu, "connection", "CONNECTION");
+    info(menu, "Steam ID", number(mp.local_id));
+    if (mp.peer_id) info(menu, "Peer", number(mp.peer_id) + (mp.peer_name.empty() ? "" : "  (" + mp.peer_name + ")"));
+    info(menu, "Update rate", std::to_string(mp.tps) + " TPS nearby, 10 / 5 TPS at distance");
+    info(menu, "Routes", std::to_string(mp.direct_connections) + " direct, " + std::to_string(mp.fallback_streams) +
+                             " forwarded by the host");
+    if (mp.active && !mp.hosting && !mp.echo)
+        info(menu, "Direct upload limit", std::to_string(mp.direct_upload_limit) + " peers (automatic)");
+    info(menu, "Messages", number(mp.sent) + " sent, " + number(mp.received) + " received");
+    if (mp.network_telemetry) {
+        info(menu, "Ping", std::to_string(mp.ping_ms) + " ms");
+        info(menu, "Traffic", decimal(mp.outgoing_bps / 1024.f) + " KiB/s out, " + decimal(mp.incoming_bps / 1024.f) + " KiB/s in");
+        info(menu, "Send budget", decimal(mp.send_rate / 1024.f) + " KiB/s total");
+        info(menu, "Gameplay queue", decimal(static_cast<double>(mp.queue_us) / 1000.0) + " ms (" +
+                                         std::to_string(mp.pending_bytes) + " bytes)");
+        info(menu, "Cosmetic queue", decimal(static_cast<double>(mp.cosmetic_queue_us) / 1000.0) + " ms, " +
+                                         std::to_string(mp.prioritized_connections) + " prioritized");
+        if (mp.delivery_local >= 0 && mp.delivery_remote >= 0)
+            info(menu, "In-order delivery", decimal(mp.delivery_local * 100.f) + "% here, " +
+                                                decimal(mp.delivery_remote * 100.f) + "% there");
+    }
+    info(menu, "Skipped / errors", number(mp.skipped_updates) + " stale skipped, " + number(mp.send_failures) +
+                                       " send errors, " + number(mp.invalid_messages) + " invalid");
+    if (mp.raw_sent_bytes)
+        info(menu, "Compression", decimal(100.0 * (1.0 - static_cast<double>(mp.sent_bytes) /
+                                                        static_cast<double>(mp.raw_sent_bytes))) + "% of outgoing bytes saved");
+    note("Automatic LZ4 / Zstd compression; unchanged bone fields are left out.");
+    end_card();
+
+    begin_card(menu, "animation", "SKATERS AND SOUND");
+    info(menu, "Captured bones", std::to_string(mp.skater_bones) + " skater, " + std::to_string(mp.board_bones) + " board");
+    info(menu, "Remote updates", number(mp.pose_updates) + " skater, " + number(mp.board_pose_updates) + " board");
+    info(menu, "Player map updates", number(mp.player_map_updates));
+    info(menu, "Sound frames", number(mp.audio_captured) + " captured, " + number(mp.audio_played) + " played");
+    end_card();
+
+    if (mp.active) {
+        begin_card(menu, "timing", "CLIENT TIMING", "average / peak per callback, 5 s window");
+        const auto &timing = mp.client_timing;
+        info(menu, "Callbacks", decimal(timing.callback_hz) + "/s, longest gap " + decimal(timing.gap_max_ms, 2) + " ms");
+        info(menu, "Multiplayer work", decimal(timing.work_ms, 2) + " / " + decimal(timing.work_max_ms, 2) + " ms");
+        constexpr std::array labels{"Capture / setup", "Receive / routing", "Encode / send", "Remote playback", "Diagnostics"};
+        for (unsigned i = 0; i < labels.size(); ++i)
+            info(menu, labels[i], decimal(timing.mean_ms[i], 2) + " / " + decimal(timing.peak_ms[i], 2) + " ms");
+        note("Native animation work runs in engine hooks outside these phases.");
+        end_card();
+    }
+
+    if (!mp.roster.empty()) {
+        begin_card(menu, "peers", "PEERS");
+        for (const auto &peer : mp.roster) {
+            const auto label = peer.name + "##peer-" + std::to_string(peer.id);
+            if (!ImGui::TreeNode(label.c_str())) continue;
+            info(menu, "Route", peer.route + ", " + decimal(peer.pose_hz) + " poses/s, target " +
+                                    std::to_string(peer.pose_target_tps) + " TPS");
+            if (peer.distance_m >= 0) info(menu, "Distance", decimal(peer.distance_m, 0) + " m");
+            info(menu, "Newest pose", number(peer.pose_age_ms) + " ms ago");
+            info(menu, "Native updates", decimal(peer.native_pose_hz) + " skater, " + decimal(peer.native_board_hz) + " board /s");
+            info(menu, "Remote graph", decimal(peer.native_animation_hz) + "/s at " + decimal(peer.native_animation_ms, 3) +
+                                           " ms, pose apply " + decimal(peer.pose_apply_ms, 3) + " ms");
+            info(menu, "Graph skips", number(peer.native_animation_skipped));
+            info(menu, "Playback", peer.playback + ", prediction " + std::to_string(peer.prediction_ms) + " ms" +
+                                       (peer.correcting ? ", correcting" : ""));
+            for (const auto *detail : {&peer.native_status, &peer.cosmetic_status, &peer.audio_status, &peer.ui_status})
+                if (!detail->empty()) note(detail->c_str());
+            ImGui::TreePop();
+        }
+        end_card();
+    }
+}
+} // namespace
+// Local-only display preferences; they live in Settings > Interface.
+void multiplayer_display_settings(SkateMenu &menu, const Model &model) {
+    const auto &mp = model.multiplayer;
+    begin_card(menu, "multiplayer-display", "MULTIPLAYER");
+    bool party_overlay = mp.party_overlay;
+    if (toggle_row(menu, "Lobby party", "Everyone in a lobby is in your game's own party (party list, member counter, Coop button, map colours). A party you form on a dedicated server always shows. Local only.",
+            party_overlay)) {
+        std::array<char, 65> unused{};
+        send_private(menu, "party-overlay", party_overlay ? "on" : "off", unused, false);
+    }
+    bool nametags = mp.nametags;
+    if (toggle_row(menu, "Player nametags", "The name above each skater.", nametags)) {
+        std::array<char, 65> unused{};
+        send_private(menu, "nametags", nametags ? "on" : "off", unused, false);
+    }
+    bool custom = mp.custom_nametags;
+    if (toggle_row(menu, "ReSkate nametags",
+                   "Names with distance: purple for ReSkate developers, gold for server admins, blue for the host, "
+                   "green for your Steam friends; far and off-screen players as dots. Off: the game's own nametags and arrows.",
+                   custom, mp.nametags, "OFF")) {
+        std::array<char, 65> unused{};
+        send_private(menu, "nametag-style", custom ? "reskate" : "game", unused, false);
+    }
+    bool chat = mp.chat_visible;
+    if (toggle_row(menu, "Text chat", "Show session chat in the bottom-right corner; T opens it. Hidden, nothing shows and T does nothing.",
+            chat)) {
+        std::array<char, 65> unused{};
+        send_private(menu, "chat-visible", chat ? "on" : "off", unused, false);
+    }
+    bool filter = mp.chat_filter;
+    if (toggle_row(menu, "Chat filter", "Show bad words in chat messages and names as ****.", filter, mp.chat_visible, "OFF")) {
+        std::array<char, 65> unused{};
+        send_private(menu, "chat-filter", filter ? "on" : "off", unused, false);
+    }
+    note("These only change your screen; nobody else is affected.");
+    end_card();
+}
+void multiplayer_network_page(SkateMenu &menu, const Model &model, const CallbacksV3 &callbacks) {
+    debug_page(menu, model.multiplayer, callbacks);
+}
+void multiplayer_page(SkateMenu &menu, const Model &model, const CallbacksV3 &callbacks) {
+    const auto &mp = model.multiplayer;
+    const bool has_session = mp.active || mp.lobby_joining;
+    if (has_session && !menu.multiplayer_session_seen) menu.multiplayer_tab = multiplayer_session_tab;
+    menu.multiplayer_session_seen = has_session;
+    category_tabs(menu, menu.multiplayer_tab, {"SERVERS", has_session ? "SESSION" : "HOST", "VOICE", "BANS"},
+                  "multiplayer-categories");
+    if (menu.multiplayer_tab != multiplayer_voice_tab) menu.voice_bind_capture = 0;
+    ImGui::PushID(menu.multiplayer_tab);
+    ImGui::BeginChild("multiplayer-category", ImVec2(0, page_body_height(menu)));
+    switch (menu.multiplayer_tab) {
+    case 0:
+        join_page(menu, model, callbacks);
+        break;
+    case multiplayer_session_tab:
+        // Hosting or joining turns the host form into the session it started.
+        if (has_session) session_page(menu, model);
+        else host_page(menu, model, callbacks);
+        break;
+    case multiplayer_voice_tab:
+        voice_controls(menu, mp);
+        break;
+    case multiplayer_bans_tab:
+        bans_page(menu, model);
+        break;
+    }
+    ImGui::EndChild();
+    ImGui::PopID();
+    password_popup(menu, model);
+    ban_popup(menu);
+}
+} // namespace dingosdk::overlay::menu

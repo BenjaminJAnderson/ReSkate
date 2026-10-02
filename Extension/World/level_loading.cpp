@@ -1,0 +1,322 @@
+#include "level_loading.h"
+#include "level_loading_progress.h"
+#include "Engine/Vfs/mod_catalog.h"
+#include "Engine/Core/Hooks/hooks.h"
+#include "Engine/Core/Log/logging.h"
+#include "Engine/Core/Platform/memory.h"
+#include "Engine/Game/Build/supported_build.h"
+#include "Engine/Game/World/client_state.h"
+#include "Engine/Game/World/world_model.h"
+#include "Engine/Game/Build/addresses.h"
+#include "Engine/Game/Build/20260929/engine.h"
+#include "Engine/Game/Build/20260929/level_loading.h"
+#include <atomic>
+#include <format>
+#include <mutex>
+#include <string>
+
+namespace dingosdk {
+namespace {
+using logging::Level;
+using logging::Channel;
+using namespace addr::level_loading;
+using Transition = void (*)(std::uintptr_t, std::uint32_t, std::uint32_t);
+using Disconnect = void (*)(std::uintptr_t, std::uint32_t);
+using StateRequest = void (*)(std::uintptr_t, std::uint32_t);
+using memory::read;
+constexpr auto highest = memory::highest_user_address;
+
+using level_logging::Sample;
+using level_logging::Progress;
+
+struct Observer {
+    std::uintptr_t base{};
+    Transition original{};
+    Disconnect original_disconnect{};
+    StateRequest original_request{};
+    BeforeLevelTransition before_transition{};
+    std::atomic<bool> active{};
+    std::atomic<std::uint64_t> next_poll{}, dropped{};
+    bool drops_reported{};
+    std::mutex mutex;
+    Progress progress;
+};
+Observer& observer() { static auto* value = new Observer; return *value; }
+void emit(Level level, std::string_view message) { logging::write(level, Channel::level, message); }
+
+// Names the mod behind a custom level that is stuck or never arrived, with
+// what built it and what the mod merge could not use from it, so a hanging
+// load can be traced to a folder from the log alone.
+std::string level_hint(std::string_view destination) {
+    try {
+        const auto& catalog = mods::catalog();
+        const auto* mod = mods::mod_registering(catalog, destination);
+        if (!mod) return {};
+        std::string text = "; this level comes from mod " + mod->name;
+        if (mod->tool.empty() && mod->version.empty() && mod->built.empty())
+            text += " (no build info recorded: an older Studio or another tool built it)";
+        else
+            text += " (built by " + (mod->tool.empty() ? std::string("an unnamed tool") : mod->tool) +
+                (mod->version.empty() ? "" : " " + mod->version) + (mod->built.empty() ? "" : " on " + mod->built) + ")";
+        if (mod->problems.empty()) {
+            text += "; the mod merge reported no problem with it";
+        } else {
+            text += "; the mod merge reported: ";
+            constexpr std::size_t shown = 2;
+            for (std::size_t index = 0; index < mod->problems.size() && index < shown; ++index)
+                text += (index ? " | " : "") + mod->problems[index];
+            if (mod->problems.size() > shown)
+                text += " | and " + std::to_string(mod->problems.size() - shown) + " more in the startup log";
+            text += "; reinstall the whole mod folder or rebuild it with a current ReSkate Studio";
+        }
+        return text;
+    } catch (...) {
+        return {};
+    }
+}
+
+bool snapshot(std::uintptr_t client, Sample& s) {
+    auto& o = observer();
+    std::uintptr_t vt{};
+    if (client < 0x10000 || client > highest - 0x440 ||
+        !read(client, vt) || vt != o.base + addr::engine::client_vtable ||
+        !read(client + 0xc4, s.state) || s.state > 26 ||
+        !read(client + 0xc0, s.game_type) || s.game_type > 3) return false;
+    s.client = client;
+    s.queues_known = read(client + 0x120, s.pending) && s.pending <= 0x10000 &&
+        read(client + 0x298, s.descriptions) && s.descriptions <= 0x10000;
+    const auto description = read_world_description(GetCurrentProcess(), client + 0x198);
+    if (description.available) {
+        s.destination = description.level;
+        if (!description.start_point.empty()) s.destination += " @ " + description.start_point;
+        if (!description.lm_level.empty()) s.destination += " + " + description.lm_level;
+        if (!description.lm_start_point.empty()) s.destination += " @ " + description.lm_start_point;
+        if (!description.game_mode.empty()) s.destination += "; mode=" + description.game_mode;
+        if (!description.hosted_mode.empty()) s.destination += "; hosted=" + description.hosted_mode;
+    }
+    unsigned after{};
+    return read(client + 0xc4, after) && after == s.state && read(client, vt) &&
+        vt == o.base + addr::engine::client_vtable;
+}
+bool observe(std::uintptr_t client, unsigned next, unsigned previous, std::uint64_t at, bool exact) noexcept {
+    auto& o = observer();
+    try {
+        // Never wait on another observer or retain this lock across a native call.
+        std::unique_lock lock(o.mutex, std::try_to_lock);
+        if (!lock.owns_lock()) { ++o.dropped; return false; }
+        Sample sample;
+        sample.at = at;
+        sample.previous = previous;
+        if (!snapshot(client, sample) || (exact && (next > 26 || previous > 26 || sample.state != next))) return false;
+        o.progress.observe(sample, exact, &emit);
+        if (o.dropped.load() && !o.drops_reported) {
+            o.drops_reported = true;
+            emit(Level::warning, "Some level observations were skipped; recorded stage timings may be incomplete.");
+        }
+        return true;
+    } catch (...) { ++o.dropped; return false; }
+}
+void transition(std::uintptr_t client, std::uint32_t next, std::uint32_t previous) {
+    const auto incoming_error = GetLastError();
+    auto& o = observer();
+    const auto started = GetTickCount64();
+    // Emit before forwarding so a stuck native handler leaves its stage in the log.
+    const bool observed = observe(client, next, previous, started, true);
+    // Lifecycle cleanup must not depend on the logging observer obtaining its
+    // try-lock. State 24's native handler can unload assets in this same call.
+    if (o.before_transition) o.before_transition(o.base, next);
+    const auto native_started = GetTickCount64();
+    SetLastError(incoming_error);
+    o.original(client, next, previous);
+    const auto outgoing_error = GetLastError();
+    const auto elapsed = GetTickCount64() - native_started;
+    if (observed && elapsed >= 1000) {
+        try {
+            std::unique_lock lock(o.mutex, std::try_to_lock);
+            if (lock.owns_lock() && o.progress.client == client) o.progress.returned(next, elapsed, &emit);
+        } catch (...) { ++o.dropped; }
+    }
+    SetLastError(outgoing_error);
+}
+bool compatible(std::uintptr_t base) noexcept {
+    if (base < 0x10000 || base > highest - supported_build::game_image_size) return false;
+    IMAGE_DOS_HEADER dos{};
+    IMAGE_NT_HEADERS64 nt{};
+    if (!read(base, dos) || dos.e_magic != IMAGE_DOS_SIGNATURE || dos.e_lfanew <= 0 || dos.e_lfanew > 0x100000 ||
+        !read(base + dos.e_lfanew, nt) || nt.Signature != IMAGE_NT_SIGNATURE ||
+        nt.FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64 || nt.OptionalHeader.SizeOfImage != supported_build::game_image_size)
+        return false;
+    for (const auto& contract : {level_transition_contract, level_transition_caller_contract}) {
+        std::array<unsigned char, 32> actual{};
+        if (!read(base + contract.rva, actual) || actual != contract.bytes) return false;
+    }
+    return true;
+}
+std::string native_callers() {
+    const auto& o = observer();
+    std::array<void*, 16> frames{};
+    const auto count = CaptureStackBackTrace(1, static_cast<DWORD>(frames.size()), frames.data(), nullptr);
+    std::string callers;
+    for (unsigned i = 0; i < count; ++i) {
+        const auto address = reinterpret_cast<std::uintptr_t>(frames[i]);
+        if (address >= o.base && address - o.base < supported_build::game_image_size)
+            callers += std::format(" Skate+{:#x}", address - o.base);
+    }
+    return callers;
+}
+void request_state(std::uintptr_t client, std::uint32_t next) {
+    auto& o = observer();
+    const auto incoming_error = GetLastError();
+    if (next == 14 || next == 22 || next == 24) {
+        try {
+            std::uint32_t previous{}, game_type{}, connection_offset{}, state{}, reason{};
+            std::uintptr_t context{}, connection{};
+            read(client + 0xc4, previous);
+            read(client + 0xc0, game_type);
+            if (read(client + 8, context) && context &&
+                read(o.base + addr::engine::context_client_connection_offset, connection_offset) && connection_offset < 0x1000000 &&
+                read(context + connection_offset, connection) && connection) {
+                read(connection + 0x120, state);
+                read(connection + 0x124, reason);
+            }
+            logging::log(Level::info, Channel::level,
+                "Native level exit requested: {} -> {}, game_type={}, connection={:#x}, state={}, reason={:#x}, callers:{}.",
+                previous, next, game_type, connection, state, reason, native_callers());
+        } catch (...) {}
+    }
+    SetLastError(incoming_error);
+    o.original_request(client, next);
+}
+void disconnect(std::uintptr_t connection, std::uint32_t reason) {
+    auto& o = observer();
+    const auto incoming_error = GetLastError();
+    // The normal shutdown reason is uninteresting. Record the origin of an
+    // unsolicited native disconnect before it drops the local hosted world.
+    if (reason != 0x102cbecd) {
+        try {
+            logging::log(Level::warning, Channel::level,
+                "Native connection disconnect: reason={:#x}, connection={:#x}, callers:{}.",
+                reason, connection, native_callers());
+        } catch (...) {}
+    }
+    SetLastError(incoming_error);
+    o.original_disconnect(connection, reason);
+}
+void trace_state_requests() {
+    auto& o = observer();
+    std::array<unsigned char, 32> bytes{};
+    if (!read(o.base + level_request_contract.rva, bytes) || bytes != level_request_contract.bytes) {
+        emit(Level::warning, "Native level-exit tracing unavailable: function contract differs.");
+        return;
+    }
+    auto* target = reinterpret_cast<void*>(o.base + level_request_contract.rva);
+    void* original{};
+    if (hook_prepare(target, reinterpret_cast<void*>(&request_state), &original) != HookOk) {
+        emit(Level::warning, "Native level-exit tracing unavailable: hook preparation failed.");
+        return;
+    }
+    o.original_request = reinterpret_cast<StateRequest>(original);
+    if (hook_enable(target) != HookOk) {
+        (void)hook_remove(target);
+        emit(Level::warning, "Native level-exit tracing unavailable: hook could not be enabled.");
+    }
+}
+void trace_disconnects() {
+    auto& o = observer();
+    std::array<unsigned char, 32> bytes{};
+    if (!read(o.base + connection_disconnect_contract.rva, bytes) || bytes != connection_disconnect_contract.bytes) {
+        emit(Level::warning, "Native disconnect tracing unavailable: function contract differs.");
+        return;
+    }
+    auto* target = reinterpret_cast<void*>(o.base + connection_disconnect_contract.rva);
+    void* original{};
+    if (hook_prepare(target, reinterpret_cast<void*>(&disconnect), &original) != HookOk) return;
+    o.original_disconnect = reinterpret_cast<Disconnect>(original);
+    if (hook_enable(target) != HookOk) {
+        (void)hook_remove(target);
+        emit(Level::warning, "Native disconnect tracing unavailable: hook could not be enabled.");
+    }
+}
+}
+
+bool start_level_loading_logging(std::uintptr_t base, BeforeLevelTransition before_transition) noexcept {
+    try {
+        auto& o = observer();
+        if (o.active.load()) return true;
+        if (!compatible(base)) {
+            emit(Level::warning, "Native level logging contract did not match; using sampled loading messages.");
+            return false;
+        }
+        o.base = base;
+        o.before_transition = before_transition;
+        auto* target = reinterpret_cast<void*>(base + level_transition_contract.rva);
+        void* original{};
+        auto status = hook_prepare(target, reinterpret_cast<void*>(&transition), &original);
+        if (status == HookOk) {
+            o.original = reinterpret_cast<Transition>(original);
+            status = hook_enable(target);
+            if (status != HookOk) {
+                const auto failure = hook_last_failure();
+                logging::log(Level::warning, Channel::level,
+                    "Native level logging hook failed: status={}, operation={}, thread={}; using sampled loading messages.",
+                    static_cast<LONG>(status), failure.operation, failure.thread_id);
+                (void)hook_remove(target);
+                return false;
+            }
+        } else {
+            logging::log(Level::warning, Channel::level,
+                "Native level logging hook preparation failed: {}; using sampled loading messages.", static_cast<LONG>(status));
+            return false;
+        }
+        o.progress.hint = &level_hint;
+        o.active.store(true);
+        trace_disconnects();
+        trace_state_requests();
+        emit(Level::info, "Native level-loading stage logging enabled.");
+        return true;
+    } catch (...) { return false; }
+}
+std::string last_level_destination() noexcept {
+    try {
+        auto& o = observer();
+        std::unique_lock lock(o.mutex, std::try_to_lock);
+        if (!lock.owns_lock()) return {};
+        return o.progress.destination;
+    } catch (...) {
+        return {};
+    }
+}
+bool level_content_active() noexcept {
+    try {
+        auto& o = observer();
+        std::unique_lock lock(o.mutex, std::try_to_lock);
+        return lock.owns_lock() && o.progress.seen && (o.progress.state == 13 || o.progress.state == 21);
+    } catch (...) {
+        return false;
+    }
+}
+std::string custom_level_hint(std::string_view destination) noexcept { return level_hint(destination); }
+std::string custom_level_notice(std::string_view destination) noexcept {
+    try {
+        const auto* mod = mods::mod_registering(mods::catalog(), destination);
+        if (!mod) return {};
+        std::string text = "It comes from mod " + mod->name;
+        text += mod->problems.empty()
+            ? ", which the mod merge reported no problem with."
+            : ", which the mod merge could not use in full. Reinstall the whole mod folder, or rebuild it "
+              "with a current ReSkate Studio.";
+        return text + " Details are in ReSkate.log.";
+    } catch (...) {
+        return {};
+    }
+}
+void poll_level_loading(std::uintptr_t client) noexcept {
+    const auto error = GetLastError();
+    auto& o = observer();
+    const auto now = GetTickCount64();
+    auto next = o.next_poll.load();
+    if (o.active.load() && now >= next && o.next_poll.compare_exchange_strong(next, now + 500))
+        (void)observe(client, 26, 26, now, false);
+    SetLastError(error);
+}
+}
