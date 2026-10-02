@@ -192,8 +192,9 @@ void update_model(std::uintptr_t client, TickState& frame) {
     auto& r = runtime();
     std::uintptr_t vtable{};
     DWORD state{}, game_type{};
-    if (!read(client, vtable) || vtable != r.base + engine::client_vtable || client > highest - 0x2a0 ||
-        !read(client + 0xc4, state) || state > 26 || !read(client + 0xc0, game_type) || game_type > 3) return;
+    // Every client tick: peeked, not read (three ReadProcessMemory calls a tick, profiled 2026-10-02).
+    if (!memory::peek(client, vtable) || vtable != r.base + engine::client_vtable || client > highest - 0x2a0 ||
+        !memory::peek(client + 0xc4, state) || state > 26 || !memory::peek(client + 0xc0, game_type) || game_type > 3) return;
     DWORD no_thread{};
     r.engine_thread.compare_exchange_strong(no_thread, GetCurrentThreadId());
     if (r.engine_thread.load() != GetCurrentThreadId()) return;
@@ -927,7 +928,7 @@ void tick(std::uintptr_t client, std::uintptr_t update) {
                 ? *tick_state.context : native_context(r.base, client, game_type);
         };
         const bool multiplayer_ready=!r.observer_failed && !loading &&
-            read(client+0xc4,state) && (state==13 || state==21) && read(client+0xc0,game_type) &&
+            memory::peek(client+0xc4,state) && (state==13 || state==21) && memory::peek(client+0xc0,game_type) &&
             context_ready();
         {
             DINGO_PROFILE_ZONE("tick/multiplayer");
@@ -939,7 +940,7 @@ void tick(std::uintptr_t client, std::uintptr_t update) {
         // session placed the remote skaters for this frame (and also out of play, to give up).
         std::uintptr_t camera_context{};
         const bool camera_phase = tick_state.camera_issue ? *tick_state.camera_issue == nullptr :
-            read(client + 8, camera_context) && !dingosdk::camera_probe_unavailable_reason(camera_context);
+            memory::peek(client + 8, camera_context) && !dingosdk::camera_probe_unavailable_reason(camera_context);
         {
             DINGO_PROFILE_ZONE("tick/native party");
             dingosdk::multiplayer::tick_native_party_actions(r.base, client,

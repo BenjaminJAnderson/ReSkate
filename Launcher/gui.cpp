@@ -275,11 +275,14 @@ int run(const launcher_app::Session& session, const std::vector<std::wstring>& a
         auto& ui = *ui_storage;
         ModsPanel mods_panel;
         bool running = true;
-        // The game this launcher started: hide when its splash opens, then exit
-        // (Close the launcher when Skate starts) or wait and return when it closes.
+        // The game this launcher started: hide when its splash opens, then wait for it
+        // to close and return, or exit (Close the launcher when Skate starts).
+        // Staying alive until then matters: outside a Steam library, Skate's protection
+        // closed the game (TerminateProcess 0x32) when the launcher exited during startup.
         HANDLE game{};
         DWORD game_id{};
         bool hidden{};
+        bool exit_with_game{};
         while (running) {
             MSG message;
             while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
@@ -302,15 +305,17 @@ int run(const launcher_app::Session& session, const std::vector<std::wstring>& a
                     hidden = true;
                 }
                 // Exit only after injection succeeded, so a failed launch can still report.
-                if (hidden && launcher.launched() && launcher.settings().close_on_launch) break;
+                if (hidden && launcher.launched() && launcher.settings().close_on_launch) exit_with_game = true;
                 if (hidden && !launcher.busy() && launcher.snapshot().phase == Phase::failed) {
                     ShowWindow(window, SW_SHOWNORMAL);
                     SetForegroundWindow(window);
                     hidden = false;
+                    exit_with_game = false;
                 }
                 if (WaitForSingleObject(game, 0) == WAIT_OBJECT_0) {
                     CloseHandle(game);
                     game = nullptr;
+                    if (exit_with_game) break;
                     launcher.game_exited(hidden);
                     if (hidden) {
                         ShowWindow(window, SW_SHOWNORMAL);

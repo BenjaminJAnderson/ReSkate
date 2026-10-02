@@ -9,9 +9,10 @@ inline constexpr std::array<std::uint8_t, 2> frame_instruction{0xf3, 0xaa};
 // Handler and data expected in R9/R14 at the frame clear.
 inline constexpr std::uintptr_t frame_handler = 0x0880d710;
 inline constexpr std::uintptr_t frame_data = 0x086772fc;
-// Exit thunk (JMP [rip+...]) and the return address it is expected to be called from.
+// Exit thunk (JMP [rip+...]) and the return address it is expected to be called from:
+// the last LEA RSP,[RSP]; JMP stub before the PUSHFQ / LOCK CMPXCHG routine, as in 20260908.
 inline constexpr std::uintptr_t exit_thunk = 0x08a06ff3;
-inline constexpr std::uintptr_t exit_return = 0x087755f2;
+inline constexpr std::uintptr_t exit_return = 0x087fe7fb;
 inline constexpr std::array<std::uint8_t, 6> exit_instruction{
     0xff, 0x25, 0x7f, 0x43, 0x5e, 0xfd};
 }

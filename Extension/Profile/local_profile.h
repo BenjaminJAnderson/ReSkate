@@ -137,6 +137,9 @@ public:
     std::string export_json() const;
     void import_json(std::string_view);
     std::uint64_t revision() const;
+    // Bumped whenever any Store's saved values may have changed (each commit, each Store made);
+    // read without the lock, so caches on hot paths can tell whether a lookup is still current.
+    static std::uint64_t changes() noexcept;
     // Same immutable object until a successful commit changes this Store's
     // revision. Retained readers remain valid after writes or Store destruction.
     std::shared_ptr<const MissionState> mission_state() const;

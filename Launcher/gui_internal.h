@@ -233,8 +233,10 @@ struct Ui {
     // The MODS tile's "2 of 3 enabled", re-read every few seconds.
     std::string mods_detail;
     double mods_checked{-100};
-    // Steam display name for the name plate, re-read every few seconds.
+    // Steam display name for the name plate, and whether Steam is running and
+    // signed in (PLAY starts offline otherwise), re-read every few seconds.
     std::string steam_name;
+    bool steam_signed_in{true};
     double steam_checked{-100};
 };
 

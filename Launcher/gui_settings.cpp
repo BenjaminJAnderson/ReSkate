@@ -184,7 +184,8 @@ void settings_window(Launcher& launcher, const Fonts& fonts, ImVec2 size, Ui& ui
     default:
         section_caption(fonts, "LAUNCHER");
         setting_check("Close the launcher when Skate starts",
-                      "Otherwise the launcher hides while you play and comes back when the game closes.",
+                      "The launcher hides while you play and exits when the game closes. "
+                      "Turn off to have it come back instead.",
                       settings.close_on_launch);
         setting_check("Install ReSkate updates",
                       "Turn off to keep the ReSkate.dll and launcher you have, such as a test build someone gave you. "
