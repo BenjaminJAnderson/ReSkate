@@ -56,6 +56,8 @@ Settings load_settings(const fs::path& path) {
         for (std::size_t index = 0; index < log_levels.size(); ++index)
             if (level == log_levels[index]) settings.log_level = static_cast<int>(index);
         settings.arguments = json.value("arguments", std::string());
+        // Keep the original settings key so existing launcher preferences survive.
+        settings.keep_open_after_launch = !json.value("close_on_launch", !settings.keep_open_after_launch);
         settings.updates = json.value("updates", settings.updates);
         settings.crash_reports = json.value("crash_reports", settings.crash_reports);
         settings.steam_username = json.value("steam_username", std::string());
@@ -79,6 +81,7 @@ void save_settings(const fs::path& path, const Settings& settings) {
     json["console_key"] = settings.console_key;
     json["log_level"] = log_levels[static_cast<std::size_t>(settings.log_level)];
     json["arguments"] = settings.arguments;
+    json["close_on_launch"] = !settings.keep_open_after_launch;
     json["updates"] = settings.updates;
     json["crash_reports"] = settings.crash_reports;
     json["steam_username"] = settings.steam_username;
@@ -129,6 +132,14 @@ Launcher::~Launcher() {
 State Launcher::snapshot() {
     std::lock_guard lock(mutex_);
     return state_;
+}
+
+void Launcher::game_exited(bool seen) {
+    game_ = 0;
+    launched_ = false;
+    if (busy_ || snapshot().phase == Phase::failed) return;
+    if (seen) check();
+    else fail("Skate closed while it was starting.");
 }
 
 void Launcher::save() {
@@ -390,6 +401,7 @@ void Launcher::run_play() {
     launched_ = true;
     set(Phase::launching, "Skate is starting", options.offline || !launcher_app::steam_signed_in() ?
         "Offline mode: playing without Steam as Unknown Player; multiplayer is hidden." :
+        settings_.keep_open_after_launch ? "The launcher hides while you play and returns when Skate closes." :
         "The launcher closes now; Skate keeps starting on its own.");
 }
 

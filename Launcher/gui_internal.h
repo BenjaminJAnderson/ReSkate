@@ -122,6 +122,7 @@ struct Settings {
     int console_key{static_cast<int>(launcher::default_console_key)};
     int log_level{2};
     std::string arguments;
+    bool keep_open_after_launch{};
     // Off: never replace ReSkate.dll or the launcher (keeps a test build someone handed out).
     bool updates{true};
     // Off: a crash uploads nothing (RESKATE_CRASH_REPORTING=0 for the launcher and the game).
@@ -159,9 +160,10 @@ public:
     bool restart_requested() const { return restart_; }
     // Process id of the Skate this launcher started, once it exists.
     DWORD game() const { return game_; }
-    // Injection finished and the game is running on its own; the launcher closes
-    // as soon as this is true.
+    // Injection finished and the game is running on its own.
     bool launched() const { return launched_; }
+    // Resets the launch state after the retained game process exits.
+    void game_exited(bool seen);
     Settings& settings() { return settings_; }
     const launcher_app::Session& session() const { return session_; }
     void save();

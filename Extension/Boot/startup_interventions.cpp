@@ -9,195 +9,201 @@
 
 namespace dingosdk {
 namespace {
-
-// Re-observed on the supported image: the interpreter frame is based on RBP,
-// and its 0x630-byte clear overlaps that frame. These are not Season 4 offsets.
-constexpr std::uint64_t protected_state = 0x343cfc26;
-constexpr std::uint32_t direction_flag = 0x400;
+namespace pins = addr::startup_interventions;
 constexpr std::uint8_t breakpoint_opcode = 0xcc;
-
 StartupInterventionMachine machine;
 std::atomic<std::uintptr_t> installed_base{};
-// The frame site sits in protector code that is regenerated for every game
-// build; when the table has no verified site for this build only the exit
-// intervention is armed.
-std::atomic_bool frame_armed{};
 PVOID handler_handle{};
+SRWLOCK handler_lock = SRWLOCK_INIT;
+std::array<std::uint8_t, startup_frame_size> saved_frame{};
+std::uintptr_t saved_frame_address{};
+
+struct HandlerGuard {
+    DWORD last_error{GetLastError()};
+    HandlerGuard() noexcept { AcquireSRWLockExclusive(&handler_lock); }
+    ~HandlerGuard() { ReleaseSRWLockExclusive(&handler_lock); SetLastError(last_error); }
+};
 
 template<class T>
 bool read_local(std::uintptr_t address, T& output) noexcept {
     SIZE_T count{};
     return address && ReadProcessMemory(GetCurrentProcess(),
-        reinterpret_cast<const void*>(address), &output, sizeof(output), &count) &&
-        count == sizeof(output);
+        reinterpret_cast<const void*>(address), &output, sizeof(output), &count) && count == sizeof(output);
 }
 
-bool executable_image_range(std::uintptr_t image_base, std::uintptr_t address,
-                            std::size_t size) noexcept {
+bool writable_range(std::uintptr_t address, std::size_t size) noexcept {
+    MEMORY_BASIC_INFORMATION memory{};
+    if (!address || !size || !VirtualQuery(reinterpret_cast<const void*>(address), &memory, sizeof(memory)) ||
+        memory.State != MEM_COMMIT || (memory.Protect & (PAGE_GUARD | PAGE_NOACCESS))) return false;
+    switch (memory.Protect & 0xff) {
+    case PAGE_READWRITE: case PAGE_WRITECOPY: case PAGE_EXECUTE_READWRITE: case PAGE_EXECUTE_WRITECOPY: break;
+    default: return false;
+    }
+    const auto region = reinterpret_cast<std::uintptr_t>(memory.BaseAddress);
+    return address >= region && address - region < memory.RegionSize && size <= memory.RegionSize - (address - region);
+}
+
+bool write_local(std::uintptr_t address, const void* data, std::size_t size) noexcept {
+    SIZE_T count{};
+    return writable_range(address, size) && WriteProcessMemory(GetCurrentProcess(),
+        reinterpret_cast<void*>(address), data, size, &count) && count == size;
+}
+
+bool executable_image_range(std::uintptr_t image_base, std::uintptr_t address, std::size_t size) noexcept {
     MEMORY_BASIC_INFORMATION memory{};
     if (!image_base || !address || !size ||
-        !VirtualQuery(reinterpret_cast<const void*>(address), &memory, sizeof(memory))) return false;
-    const auto executable = [](DWORD protection) {
-        if (protection & (PAGE_GUARD | PAGE_NOACCESS)) return false;
-        switch (protection & 0xff) {
-        case PAGE_EXECUTE:
-        case PAGE_EXECUTE_READ:
-        case PAGE_EXECUTE_READWRITE:
-        case PAGE_EXECUTE_WRITECOPY:
-            return true;
-        default:
-            return false;
-        }
-    };
-    const auto end = reinterpret_cast<std::uintptr_t>(memory.BaseAddress) + memory.RegionSize;
+        !VirtualQuery(reinterpret_cast<const void*>(address), &memory, sizeof(memory)) ||
+        (memory.Protect & (PAGE_GUARD | PAGE_NOACCESS))) return false;
+    switch (memory.Protect & 0xff) {
+    case PAGE_EXECUTE: case PAGE_EXECUTE_READ: case PAGE_EXECUTE_READWRITE: case PAGE_EXECUTE_WRITECOPY: break;
+    default: return false;
+    }
+    const auto region = reinterpret_cast<std::uintptr_t>(memory.BaseAddress);
     return memory.State == MEM_COMMIT && memory.Type == MEM_IMAGE &&
         reinterpret_cast<std::uintptr_t>(memory.AllocationBase) == image_base &&
-        executable(memory.Protect) && address <= end && size <= end - address;
+        address >= region && address - region < memory.RegionSize && size <= memory.RegionSize - (address - region);
 }
 
 bool write_opcode(std::uintptr_t address, std::uint8_t opcode) noexcept {
     DWORD old_protection{};
-    if (!VirtualProtect(reinterpret_cast<void*>(address), 1, PAGE_EXECUTE_READWRITE,
-            &old_protection)) return false;
+    if (!VirtualProtect(reinterpret_cast<void*>(address), 1, PAGE_EXECUTE_READWRITE, &old_protection)) return false;
     SIZE_T count{};
-    const auto wrote = WriteProcessMemory(GetCurrentProcess(), reinterpret_cast<void*>(address),
-        &opcode, sizeof(opcode), &count) && count == sizeof(opcode);
-    const auto flushed = wrote && FlushInstructionCache(
-        GetCurrentProcess(), reinterpret_cast<void*>(address), 1) != FALSE;
+    const auto wrote = WriteProcessMemory(GetCurrentProcess(), reinterpret_cast<void*>(address), &opcode, 1, &count) && count == 1;
+    const auto flushed = wrote && FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(address), 1) != FALSE;
     DWORD ignored{};
-    const auto protected_again = VirtualProtect(
-        reinterpret_cast<void*>(address), 1, old_protection, &ignored) != FALSE;
+    const auto protected_again = VirtualProtect(reinterpret_cast<void*>(address), 1, old_protection, &ignored) != FALSE;
     return wrote && flushed && protected_again;
 }
 
-StartupInterventionRegisters capture_registers(const CONTEXT& context,
-                                               std::uintptr_t exception_address) noexcept {
-    return {exception_address, context.Rsp, context.Rax, context.Rbx, context.Rcx,
-            context.Rdx, context.Rbp, context.Rsi, context.Rdi, context.R8,
-            context.R9, context.R14, context.EFlags};
+StartupInterventionRegisters capture_registers(const CONTEXT& c, std::uintptr_t address) noexcept {
+    return {address, c.Rsp, c.Rax, c.Rbx, c.Rcx, c.Rdx, c.Rbp, c.Rsi, c.Rdi,
+            c.R8, c.R9, c.R10, c.R11, c.R14, c.R15, c.EFlags};
 }
 
-void apply_registers(CONTEXT& context, const StartupInterventionRegisters& registers) noexcept {
-    context.Rip = registers.rip;
-    context.Rsp = registers.rsp;
-    context.Rax = registers.rax;
-    context.Rcx = registers.rcx;
-    context.Rdi = registers.rdi;
+bool frame_shape_matches(std::uintptr_t base, const StartupInterventionRegisters& r) noexcept {
+    return base == supported_build::preferred_image_base && r.rip == base + startup_frame_rva &&
+        r.rbp >= pins::frame_stack_offset && r.rsp == r.rbp - pins::frame_stack_offset &&
+        r.rcx == r.rbp - pins::frame_vm_offset && r.rdx == r.rbp - startup_frame_size &&
+        r.r15 == r.rbp - pins::frame_saved_registers_offset &&
+        r.r11 == base + startup_frame_data_rva && r.r9 == pins::frame_count && r.r10 == r.r9 &&
+        (r.rsi & 0xff) == 0;
 }
 
 LONG CALLBACK intervention_handler(EXCEPTION_POINTERS* pointers) {
     if (!pointers || !pointers->ExceptionRecord || !pointers->ContextRecord ||
-        pointers->ExceptionRecord->ExceptionCode != EXCEPTION_BREAKPOINT)
+        pointers->ExceptionRecord->ExceptionCode != EXCEPTION_BREAKPOINT) return EXCEPTION_CONTINUE_SEARCH;
+    const auto base = installed_base.load(std::memory_order_acquire);
+    const auto address = reinterpret_cast<std::uintptr_t>(pointers->ExceptionRecord->ExceptionAddress);
+    if (!base || (address != base + startup_frame_rva && address != base + startup_exit_rva))
         return EXCEPTION_CONTINUE_SEARCH;
-    const auto image_base = installed_base.load(std::memory_order_acquire);
-    if (!image_base) return EXCEPTION_CONTINUE_SEARCH;
-    const auto address = reinterpret_cast<std::uintptr_t>(
-        pointers->ExceptionRecord->ExceptionAddress);
-    auto registers = capture_registers(*pointers->ContextRecord, address);
+    HandlerGuard guard;
+    auto& context = *pointers->ContextRecord;
+    auto registers = capture_registers(context, address);
+    const auto thread = GetCurrentThreadId();
 
-    if (address == image_base + startup_frame_rva) {
-        std::array<std::uint8_t, 2> patched{};
-        std::uint64_t state{};
-        if (!read_local(address, patched) || patched[0] != breakpoint_opcode ||
-            registers.rbp > std::numeric_limits<std::uintptr_t>::max() - startup_frame_state_offset ||
-            !read_local(registers.rbp + startup_frame_state_offset, state)) {
-            machine.fail();
-            return EXCEPTION_CONTINUE_SEARCH;
+    if (address == base + startup_frame_rva) {
+        std::array<std::uint8_t, 3> instruction{};
+        if (!read_local(address, instruction) ||
+            (instruction[0] != breakpoint_opcode && instruction[0] != startup_frame_instruction[0])) return EXCEPTION_CONTINUE_SEARCH;
+        const bool patched = instruction[0] == breakpoint_opcode;
+        instruction[0] = startup_frame_instruction[0];
+        if (instruction != startup_frame_instruction) { machine.fail(); return EXCEPTION_CONTINUE_SEARCH; }
+        // Another thread may have fetched INT3 before capture restored the site.
+        if (!patched) { context.Rip = address; return EXCEPTION_CONTINUE_EXECUTION; }
+        if (machine.phase() == StartupInterventionPhase::armed && frame_shape_matches(base, registers)) {
+            StartupFrameMetadata metadata{};
+            if (!read_local(registers.rcx + startup_frame_cursor_offset, metadata.cursor)) {
+                machine.fail(); return EXCEPTION_CONTINUE_SEARCH;
+            }
+            if (startup_frame_clear_matches(base, registers, instruction, metadata)) {
+                const auto frame_address = registers.rbp - startup_frame_size;
+                if (!read_local(frame_address, saved_frame) ||
+                    !machine.capture_frame(base, registers, instruction, metadata, thread) ||
+                    !write_opcode(address, startup_frame_instruction[0])) {
+                    machine.fail(); return EXCEPTION_CONTINUE_SEARCH;
+                }
+                saved_frame_address = frame_address;
+                // Let the original clear run; restore this exact frame only if the
+                // guarded exit arrives on the same thread and native stack frame.
+                context.Rip = address;
+                logging::log(logging::Level::info, logging::Channel::runtime,
+                    "Startup frame captured: {} bytes, site {:#x}, bytecode {:#x}",
+                    saved_frame.size(), startup_frame_rva, startup_frame_data_rva);
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
         }
-        const std::array<std::uint8_t, 2> original{startup_frame_instruction[0], patched[1]};
-        if (!machine.preserve_frame(image_base, registers, original, state) ||
-            !write_opcode(address, startup_frame_instruction[0])) {
+        // This VM opcode also performs ordinary byte stores before the target
+        // clear. Reproduce MOV [RDX], SIL without changing flags or registers.
+        const auto byte = static_cast<std::uint8_t>(registers.rsi);
+        if (!write_local(registers.rdx, &byte, sizeof(byte))) {
             machine.fail();
-            return EXCEPTION_CONTINUE_SEARCH;
+            logging::write(logging::Level::error, logging::Channel::runtime,
+                "Startup byte-store intervention could not replay an ordinary store");
+            if (!write_opcode(address, startup_frame_instruction[0])) return EXCEPTION_CONTINUE_SEARCH;
+            context.Rip = address;
+            return EXCEPTION_CONTINUE_EXECUTION;
         }
-        apply_registers(*pointers->ContextRecord, registers);
+        context.Rip = address + startup_frame_instruction.size();
         return EXCEPTION_CONTINUE_EXECUTION;
     }
 
-    if (address == image_base + startup_exit_rva) {
-        std::array<std::uint8_t, 6> patched{};
-        std::uint64_t return_address{};
-        if (!read_local(address, patched) || patched[0] != breakpoint_opcode ||
-            registers.rsp > std::numeric_limits<std::uintptr_t>::max() - sizeof(return_address) ||
-            !read_local(registers.rsp, return_address)) {
-            machine.fail();
-            return EXCEPTION_CONTINUE_SEARCH;
-        }
-        patched[0] = startup_exit_instruction[0];
-        logging::log(logging::Level::info, logging::Channel::runtime,
-            "Startup exit intervention hit: return {:#x}, rcx {:#x}, rdx {:#x}, frame site {}",
-            return_address >= image_base ? return_address - image_base : return_address, registers.rcx,
-            registers.rdx, frame_armed.load() ? "armed" : "not armed");
-        if (!machine.return_from_exit(image_base, registers, patched, return_address) ||
-            !write_opcode(address, startup_exit_instruction[0])) {
-            machine.fail();
-            return EXCEPTION_CONTINUE_SEARCH;
-        }
-        apply_registers(*pointers->ContextRecord, registers);
-        return EXCEPTION_CONTINUE_EXECUTION;
+    std::array<std::uint8_t, 6> instruction{};
+    std::uint64_t return_address{};
+    if (!read_local(address, instruction) || instruction[0] != breakpoint_opcode ||
+        !read_local(registers.rsp, return_address)) { machine.fail(); return EXCEPTION_CONTINUE_SEARCH; }
+    instruction[0] = startup_exit_instruction[0];
+    logging::log(logging::Level::info, logging::Channel::runtime,
+        "Startup exit intervention hit: return {:#x}, rcx {:#x}, rdx {:#x}, frame captured {}",
+        return_address >= base ? return_address - base : return_address, registers.rcx, registers.rdx,
+        machine.phase() == StartupInterventionPhase::frame_captured);
+    if (!machine.return_from_exit(base, registers, instruction, return_address, thread) ||
+        !write_local(saved_frame_address, saved_frame.data(), saved_frame.size()) ||
+        !write_opcode(address, startup_exit_instruction[0])) {
+        machine.fail();
+        logging::write(logging::Level::error, logging::Channel::runtime, "Startup exit/frame restoration guard failed");
+        return EXCEPTION_CONTINUE_SEARCH;
     }
-    return EXCEPTION_CONTINUE_SEARCH;
+    context.Rax = registers.rax;
+    context.Rip = registers.rip;
+    context.Rsp = registers.rsp;
+    logging::log(logging::Level::info, logging::Channel::runtime,
+        "Startup frame restored: {} bytes; exit intervention completed", saved_frame.size());
+    return EXCEPTION_CONTINUE_EXECUTION;
 }
-
 } // namespace
+
+bool startup_frame_clear_matches(std::uintptr_t base, const StartupInterventionRegisters& registers,
+    const std::array<std::uint8_t, 3>& instruction, const StartupFrameMetadata& metadata) noexcept {
+    return frame_shape_matches(base, registers) && instruction == startup_frame_instruction &&
+        metadata.cursor == base + startup_frame_cursor_rva;
+}
 
 bool StartupInterventionMachine::arm() noexcept {
     auto expected = StartupInterventionPhase::uninitialized;
-    return phase_.compare_exchange_strong(expected, StartupInterventionPhase::armed,
-        std::memory_order_acq_rel);
+    return phase_.compare_exchange_strong(expected, StartupInterventionPhase::armed, std::memory_order_acq_rel);
 }
 
-bool StartupInterventionMachine::preserve_frame(
-    std::uintptr_t image_base, StartupInterventionRegisters& registers,
-    const std::array<std::uint8_t, 2>& instruction,
-    std::uint64_t state) noexcept {
+bool StartupInterventionMachine::capture_frame(std::uintptr_t base, const StartupInterventionRegisters& registers,
+    const std::array<std::uint8_t, 3>& instruction, const StartupFrameMetadata& metadata, std::uint32_t thread) noexcept {
     auto expected = StartupInterventionPhase::armed;
-    if (!phase_.compare_exchange_strong(expected, StartupInterventionPhase::handling_frame,
-            std::memory_order_acq_rel)) return false;
-    const auto matches = image_base == supported_build::preferred_image_base &&
-        registers.rip == image_base + startup_frame_rva && registers.rsp == registers.rbp &&
-        registers.rcx == 0x630 &&
-        registers.rdi <= std::numeric_limits<std::uint64_t>::max() - 0x210 &&
-        registers.rdi + 0x210 == registers.rsp && registers.r8 == registers.rdi &&
-        registers.r9 == image_base + startup_frame_handler_rva &&
-        registers.r14 == image_base + startup_frame_data_rva &&
-        (registers.rax & 0xff) == 0 && !(registers.eflags & direction_flag) &&
-        instruction == startup_frame_instruction && state == protected_state &&
-        registers.rdi <= std::numeric_limits<std::uint64_t>::max() - registers.rcx;
-    if (!matches) {
-        phase_.store(StartupInterventionPhase::failed, std::memory_order_release);
-        return false;
-    }
-    registers.rdi += registers.rcx;
-    registers.rcx = 0;
-    registers.rip += instruction.size();
-    phase_.store(StartupInterventionPhase::frame_preserved, std::memory_order_release);
+    if (!phase_.compare_exchange_strong(expected, StartupInterventionPhase::handling_frame, std::memory_order_acq_rel)) return false;
+    if (!thread || !startup_frame_clear_matches(base, registers, instruction, metadata)) { fail(); return false; }
+    frame_base_ = registers.rbp;
+    frame_thread_ = thread;
+    phase_.store(StartupInterventionPhase::frame_captured, std::memory_order_release);
     return true;
 }
 
-bool StartupInterventionMachine::return_from_exit(
-    std::uintptr_t image_base, StartupInterventionRegisters& registers,
-    const std::array<std::uint8_t, 6>& instruction,
-    std::uint64_t return_address) noexcept {
-    const bool frame = frame_armed.load(std::memory_order_acquire);
-    auto expected = frame ? StartupInterventionPhase::frame_preserved : StartupInterventionPhase::armed;
-    if (!phase_.compare_exchange_strong(expected, StartupInterventionPhase::handling_exit,
-            std::memory_order_acq_rel)) return false;
-    // With the frame site verified the exact protector return address is pinned
-    // too; without it, TerminateProcess(current process, 0x32) from this build's
-    // protector thunk back into the image is the guard.
-    const bool return_matches = return_address == image_base + startup_exit_return_rva ||
-        (!frame && return_address >= image_base && return_address - image_base < startup_expected_image_size);
-    const auto matches = image_base == supported_build::preferred_image_base &&
-        registers.rip == image_base + startup_exit_rva &&
-        registers.rcx == std::numeric_limits<std::uint64_t>::max() &&
-        registers.rdx == 0x32 && return_matches &&
-        instruction == startup_exit_instruction &&
-        registers.rsp <= std::numeric_limits<std::uint64_t>::max() - sizeof(return_address);
-    if (!matches) {
-        phase_.store(StartupInterventionPhase::failed, std::memory_order_release);
-        return false;
-    }
+bool StartupInterventionMachine::return_from_exit(std::uintptr_t base, StartupInterventionRegisters& registers,
+    const std::array<std::uint8_t, 6>& instruction, std::uint64_t return_address, std::uint32_t thread) noexcept {
+    auto expected = StartupInterventionPhase::frame_captured;
+    if (!phase_.compare_exchange_strong(expected, StartupInterventionPhase::handling_exit, std::memory_order_acq_rel)) return false;
+    const bool matches = base == supported_build::preferred_image_base && registers.rip == base + startup_exit_rva &&
+        registers.rcx == std::numeric_limits<std::uint64_t>::max() && registers.rdx == 0x32 &&
+        instruction == startup_exit_instruction && return_address == base + startup_exit_return_rva &&
+        thread == frame_thread_ && registers.rbp == frame_base_ &&
+        frame_base_ >= pins::exit_stack_offset && registers.rsp == frame_base_ - pins::exit_stack_offset;
+    if (!matches) { fail(); return false; }
     registers.rax = FALSE;
     registers.rip = return_address;
     registers.rsp += sizeof(return_address);
@@ -205,84 +211,60 @@ bool StartupInterventionMachine::return_from_exit(
     return true;
 }
 
-void StartupInterventionMachine::fail() noexcept {
-    phase_.store(StartupInterventionPhase::failed, std::memory_order_release);
+void StartupInterventionMachine::fail() noexcept { phase_.store(StartupInterventionPhase::failed, std::memory_order_release); }
+StartupInterventionPhase StartupInterventionMachine::phase() const noexcept { return phase_.load(std::memory_order_acquire); }
+
+bool startup_intervention_fingerprints_match(std::uintptr_t base, std::uint32_t size,
+    const std::array<std::uint8_t, 8>& frame, const std::array<std::uint8_t, 6>& exit) noexcept {
+    return base == supported_build::preferred_image_base && size == startup_expected_image_size &&
+        frame == startup_frame_fingerprint && exit == startup_exit_instruction;
 }
 
-StartupInterventionPhase StartupInterventionMachine::phase() const noexcept {
-    return phase_.load(std::memory_order_acquire);
-}
-
-bool startup_intervention_fingerprints_match(
-    std::uintptr_t image_base, std::uint32_t image_size,
-    const std::array<std::uint8_t, 6>& exit_instruction) noexcept {
-    return image_base == supported_build::preferred_image_base &&
-        image_size == startup_expected_image_size &&
-        exit_instruction == startup_exit_instruction;
-}
-
-bool start_startup_interventions(std::uintptr_t image_base, std::string& error) noexcept {
+bool start_startup_interventions(std::uintptr_t base, std::string& error) noexcept {
     error.clear();
     try {
-        if (handler_handle || installed_base.load())
-            throw std::runtime_error("Startup interventions are already installed");
+        if (handler_handle || installed_base.load()) throw std::runtime_error("Startup interventions are already installed");
         IMAGE_DOS_HEADER dos{};
-        if (!read_local(image_base, dos) || dos.e_magic != IMAGE_DOS_SIGNATURE ||
-            dos.e_lfanew <= 0 || dos.e_lfanew > 0x100000)
+        if (!read_local(base, dos) || dos.e_magic != IMAGE_DOS_SIGNATURE || dos.e_lfanew <= 0 || dos.e_lfanew > 0x100000)
             throw std::runtime_error("Startup intervention image has an invalid DOS header");
         IMAGE_NT_HEADERS64 nt{};
-        if (!read_local(image_base + static_cast<std::uintptr_t>(dos.e_lfanew), nt) ||
-            nt.Signature != IMAGE_NT_SIGNATURE ||
-            nt.FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64 ||
-            nt.OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC)
+        if (!read_local(base + static_cast<std::uintptr_t>(dos.e_lfanew), nt) || nt.Signature != IMAGE_NT_SIGNATURE ||
+            nt.FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64 || nt.OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC)
             throw std::runtime_error("Startup intervention image has an invalid PE header");
-        const auto frame_address = image_base + startup_frame_rva;
-        const auto exit_address = image_base + startup_exit_rva;
-        if (exit_address < image_base ||
-            !executable_image_range(image_base, exit_address, startup_exit_instruction.size()))
+        const auto frame_address = base + startup_frame_rva;
+        const auto exit_address = base + startup_exit_rva;
+        if (!executable_image_range(base, frame_address, startup_frame_fingerprint.size()) ||
+            !executable_image_range(base, exit_address, startup_exit_instruction.size()))
             throw std::runtime_error("Startup intervention sites are outside executable image pages");
-        std::array<std::uint8_t, 2> frame{};
+        std::array<std::uint8_t, 8> frame{};
         std::array<std::uint8_t, 6> exit{};
-        if (!read_local(exit_address, exit) ||
-            !startup_intervention_fingerprints_match(image_base,
-                nt.OptionalHeader.SizeOfImage, exit))
+        if (!read_local(frame_address, frame) || !read_local(exit_address, exit) ||
+            !startup_intervention_fingerprints_match(base, nt.OptionalHeader.SizeOfImage, frame, exit))
             throw std::runtime_error("Startup intervention image fingerprint does not match");
-        const bool arm_frame = frame_address >= image_base &&
-            executable_image_range(image_base, frame_address, startup_frame_instruction.size()) &&
-            read_local(frame_address, frame) && frame == startup_frame_instruction;
-        frame_armed.store(arm_frame, std::memory_order_release);
-
-        installed_base.store(image_base, std::memory_order_release);
+        installed_base.store(base, std::memory_order_release);
         handler_handle = AddVectoredExceptionHandler(1, intervention_handler);
-        if (!handler_handle) {
-            installed_base.store(0, std::memory_order_release);
-            throw std::runtime_error("Cannot install startup intervention exception handler");
+        if (!handler_handle) { installed_base.store(0); throw std::runtime_error("Cannot install startup intervention exception handler"); }
+        bool frame_attempted = false;
+        if (!write_opcode(exit_address, breakpoint_opcode))
+            error = "Cannot arm the guarded startup-exit intervention";
+        if (error.empty()) {
+            frame_attempted = true;
+            if (!write_opcode(frame_address, breakpoint_opcode))
+                error = "Cannot arm the guarded frame-capture intervention";
         }
-        bool frame_patched = false;
-        bool exit_patched = false;
-        if (write_opcode(exit_address, breakpoint_opcode)) exit_patched = true;
-        else error = "Cannot arm the guarded startup-exit intervention";
-        if (error.empty() && arm_frame) {
-            if (write_opcode(frame_address, breakpoint_opcode)) frame_patched = true;
-            else error = "Cannot arm the guarded frame-preservation intervention";
-        }
-        if (error.empty() && !machine.arm())
-            error = "Cannot arm the startup intervention state machine";
+        if (error.empty() && !machine.arm()) error = "Cannot arm the startup intervention state machine";
         if (!error.empty()) {
-            if (frame_patched) write_opcode(frame_address, startup_frame_instruction[0]);
-            if (exit_patched) write_opcode(exit_address, startup_exit_instruction[0]);
+            if (frame_attempted) write_opcode(frame_address, startup_frame_instruction[0]);
+            write_opcode(exit_address, startup_exit_instruction[0]);
             RemoveVectoredExceptionHandler(handler_handle);
             handler_handle = nullptr;
-            installed_base.store(0, std::memory_order_release);
+            installed_base.store(0);
             machine.fail();
             return false;
         }
+        logging::log(logging::Level::info, logging::Channel::runtime,
+            "Startup interventions armed: frame {:#x}, exit {:#x}", startup_frame_rva, startup_exit_rva);
         return true;
-    } catch (const std::exception& exception) {
-        error = exception.what();
-        machine.fail();
-        return false;
-    }
+    } catch (const std::exception& exception) { error = exception.what(); machine.fail(); return false; }
 }
-
 } // namespace dingosdk
