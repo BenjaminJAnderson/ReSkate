@@ -409,13 +409,12 @@ void frame(Launcher& launcher, const Fonts& fonts, HWND window, Ui& ui, ModsPane
     std::string detail;
     bool enabled = !launcher.busy();
     bool secondary = false;
-    const auto build = state.config && !state.config->game.build_id.empty() ? state.config->game.build_id : std::string();
     switch (state.phase) {
     case Phase::checking: label = "CHECKING"; enabled = false; break;
     case Phase::update_available: label = "UPDATE"; detail = "New ReSkate files are ready"; break;
     case Phase::updating: label = "UPDATING"; enabled = false; break;
     case Phase::game_missing: label = "INSTALL"; detail = "Download skate. from Steam"; break;
-    case Phase::game_outdated: label = "DOWNLOAD"; detail = "Get skate. build " + build; break;
+    case Phase::game_outdated: label = "DOWNLOAD"; detail = "Get the supported build from Steam"; break;
     case Phase::downloading:
         label = "CANCEL"; enabled = true; secondary = true;
         detail = state.progress >= 0 ? std::format("Downloading  {:.0f}%", state.progress * 100) : "Downloading";

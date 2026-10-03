@@ -292,11 +292,10 @@ void Launcher::run_check() {
             fail("This launcher is out of date. Download the latest ReSkate release.");
             return;
         }
-        const auto build = config->game.build_id.empty() ? config->game.manifest_id : config->game.build_id;
         if (installed) set(Phase::game_outdated, "Steam updated Skate",
-            std::format("ReSkate needs build {}. Only changed files are downloaded.", build));
+            "ReSkate needs the build below. Only the files that differ are downloaded.");
         else set(Phase::game_missing, "Skate is not installed here",
-            std::format("Install build {} from Steam (about 14 GB). Your account must own skate.", build));
+            "Download the build below from Steam, about 14 GB, with an account that owns skate.");
         return;
     }
     std::error_code error;
