@@ -1,4 +1,5 @@
 #include "mod_merge_internal.h"
+#include "Engine/Core/Platform/path_text.h"
 
 #include <Windows.h>
 #include <algorithm>
@@ -69,7 +70,7 @@ std::string merge_fingerprint(const Catalog& catalog, const std::vector<const Mo
             if (it->is_regular_file(error) && !error) files.push_back(it->path());
             error.clear();
         }
-        if (error) throw std::runtime_error("Cannot list " + mod->directory.string());
+        if (error) throw std::runtime_error("Cannot list " + path_utf8(mod->directory));
         std::ranges::sort(files);
         for (const auto& file : files)
             describe(utf8(fs::relative(file, mod->directory, error)), file);
@@ -151,10 +152,10 @@ void write_stamp(const fs::path& output, const std::string& fingerprint, const M
     for (fs::recursive_directory_iterator it(output, error), end; it != end && !error; it.increment(error)) {
         if (!it->is_regular_file(error) || error) { error.clear(); continue; }
         const auto size = fs::file_size(it->path(), error);
-        if (error) throw std::runtime_error("Cannot size " + it->path().string());
+        if (error) throw std::runtime_error("Cannot size " + path_utf8(it->path()));
         text += "file " + std::to_string(size) + ' ' + utf8(fs::relative(it->path(), output, error)) + '\n';
     }
-    if (error) throw std::runtime_error("Cannot list " + output.string());
+    if (error) throw std::runtime_error("Cannot list " + path_utf8(output));
     for (auto note : report.notes) {
         std::ranges::replace(note, '\n', ' ');
         std::ranges::replace(note, '\r', ' ');

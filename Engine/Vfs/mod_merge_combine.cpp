@@ -5,6 +5,7 @@
 #include "Engine/Resource/ebx_merge.h"
 #include "Engine/Resource/ebx_writer.h"
 #include "Engine/Resource/shader_lookup.h"
+#include "Engine/Core/Platform/path_text.h"
 
 #include <algorithm>
 #include <map>
@@ -153,7 +154,7 @@ fb::TocDocument combine(const fs::path& baseToc, const fs::path& baseRoot,
         auto region = fb::read_bundle_region(bundle.region);
         const auto provider = providers.find(key);
         const auto shared = provider != providers.end() && provider->second > 1;
-        const auto modName = isBase ? std::string("base") : root.filename().string();
+        const auto modName = isBase ? std::string("base") : path_utf8(root.filename());
         // The bundle holding the live material grid is rebuilt to carry the
         // combined one, and a mod whose surfaces moved has its collision
         // renumbered; both need the asset list even where one mod ships it.

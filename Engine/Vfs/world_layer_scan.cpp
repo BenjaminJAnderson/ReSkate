@@ -3,6 +3,7 @@
 #include "game_bundles.h"
 #include "Engine/Core/Json/json.h"
 #include "Engine/Resource/ebx_document.h"
+#include "Engine/Core/Platform/path_text.h"
 #include <algorithm>
 #include <array>
 #include <fstream>
@@ -252,7 +253,7 @@ WorldLayerCatalog load_or_scan(const fs::path& gameRoot, const fs::path& file) {
 
 WorldLayerCatalog read(const fs::path& file) {
     std::ifstream input(file, std::ios::binary);
-    if (!input) throw std::runtime_error("Cannot open " + file.string());
+    if (!input) throw std::runtime_error("Cannot open " + path_utf8(file));
     const std::string text{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
     return from_json(Json::parse(text.begin(), text.end()));
 }

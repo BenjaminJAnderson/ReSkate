@@ -1,5 +1,6 @@
 #include "game_bundles.h"
 #include "Engine/Resource/cas_codec.h"
+#include "Engine/Core/Platform/path_text.h"
 #include <fstream>
 #include <stdexcept>
 
@@ -50,10 +51,10 @@ GameData::GameData(fs::path gameRoot)
 fb::TocDocument GameData::read_toc(std::string_view relative) const {
     const auto path = gameRoot_ / L"Data" / fs::path(relative);
     std::ifstream input(path, std::ios::binary);
-    if (!input) throw std::runtime_error("Cannot open " + path.string());
+    if (!input) throw std::runtime_error("Cannot open " + path_utf8(path));
     std::vector<std::byte> bytes(static_cast<std::size_t>(fs::file_size(path)));
     if (!input.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size())))
-        throw std::runtime_error("Cannot read " + path.string());
+        throw std::runtime_error("Cannot read " + path_utf8(path));
     return fb::read_toc(bytes);
 }
 

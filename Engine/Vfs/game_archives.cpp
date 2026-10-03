@@ -1,5 +1,6 @@
 #include "game_archives.h"
 #include "Engine/Resource/cas_codec.h"
+#include "Engine/Core/Platform/path_text.h"
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -26,7 +27,7 @@ Layout read_layout(const fs::path& path) {
     Layout layout{{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()}, {}};
     if (layout.buffer.size() <= native_db::envelope_size ||
         std::memcmp(layout.buffer.data(), native_db::magic, sizeof(native_db::magic)))
-        throw std::runtime_error("Unrecognized native envelope in " + path.string());
+        throw std::runtime_error("Unrecognized native envelope in " + path_utf8(path));
     layout.root = native_db::read(std::span<const unsigned char>(layout.buffer).subspan(native_db::envelope_size),
                                   "layout.toc", nullptr, {.unique_fields = false});
     return layout;
@@ -108,11 +109,11 @@ std::vector<std::byte> GameArchives::read(const fs::path& root, const fb::CasIde
     const auto path = root / L"Win32" / fs::path(directory(location.installChunk)) /
         fs::path(archive_file(location.archive));
     std::ifstream input(path, std::ios::binary);
-    if (!input) throw std::runtime_error("Cannot open " + path.string());
+    if (!input) throw std::runtime_error("Cannot open " + path_utf8(path));
     input.seekg(static_cast<std::streamoff>(offset));
     std::vector<std::byte> bytes(size);
     if (size && !input.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(size)))
-        throw std::runtime_error("Cannot read " + path.string());
+        throw std::runtime_error("Cannot read " + path_utf8(path));
     return bytes;
 }
 
