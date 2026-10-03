@@ -22,6 +22,11 @@ fb::BundleFileInfo CasStore::write(std::uint32_t installChunk, std::uint16_t arc
         const auto existing = fs::file_size(path, error);
         if (!error) offset = existing;
     }
+    // A placement holds a 32-bit offset; one past it would wrap round and
+    // point the game at some other payload.
+    if (offset + encoded.size() > std::numeric_limits<std::uint32_t>::max())
+        throw std::runtime_error("The merged patch's own archive " + path_utf8(path) +
+                                 " is full (4 GB); restart Skate so it is built again");
     std::ofstream out(path, std::ios::binary | std::ios::app);
     if (!out || !out.write(reinterpret_cast<const char*>(encoded.data()),
                            static_cast<std::streamsize>(encoded.size())))

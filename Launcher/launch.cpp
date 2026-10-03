@@ -423,7 +423,10 @@ RemoteModule inject_dll(HANDLE process, DWORD process_id, const fs::path& dll) {
     SIZE_T written{};
     if (!WriteProcessMemory(process, remote_path.get(), path.c_str(), byte_count, &written) ||
         written != byte_count) win32_failure(L"WriteProcessMemory(ReSkate.dll path)");
-    const auto loader = dingosdk::launcher::validated_remote_load_library(process);
+    std::string hook_note;
+    const auto loader = dingosdk::launcher::validated_remote_load_library(process, &hook_note);
+    if (!hook_note.empty())
+        dingosdk::logging::write(dingosdk::logging::Level::warning, dingosdk::logging::Channel::launcher, hook_note);
     std::wostringstream address;
     address << L"Starting ordinary LoadLibraryW injection at 0x" << std::hex << loader;
     dingosdk::logging::write(dingosdk::logging::Level::info, dingosdk::logging::Channel::launcher, address.str());
@@ -648,21 +651,30 @@ DWORD start_game(const Session& session, const launcher::LaunchOptions& options,
         logging::log(logging::Level::warning, logging::Channel::world, "World layers could not be read: {}", error.what());
     }
     configure_environment(paths.logs);
-    const bool loose_files = options.loose_files && initfs::loose_files_preference(paths.directory);
-    set_environment(L"RESKATE_LOOSE_FILES", loose_files ? L"1" : L"0");
+    bool loose_files = options.loose_files && initfs::loose_files_preference(paths.directory);
     if (loose_files) {
-        fs::create_directories(paths.directory / L"scripts" / L"Custom");
-        const auto exported = initfs::export_files(paths.game,
-            initfs::data_directory(paths.directory, options.game_arguments), paths.directory, true);
-        if (exported.already_exported) {
-            logging::write(logging::Level::info, logging::Channel::assets,
-                "Using existing scripts/ and config/ export; edits and removed files are preserved.");
-        } else {
-            logging::log(logging::Level::info, logging::Channel::assets,
-                "InitFS exported: {} Lua, {} configs; {} created, {} existing files preserved, {} skipped.",
-                exported.scripts, exported.configs, exported.created, exported.preserved, exported.skipped);
+        try {
+            fs::create_directories(paths.directory / L"scripts" / L"Custom");
+            const auto exported = initfs::export_files(paths.game,
+                initfs::data_directory(paths.directory, options.game_arguments), paths.directory, true);
+            if (exported.already_exported) {
+                logging::write(logging::Level::info, logging::Channel::assets,
+                    "Using existing scripts/ and config/ export; edits and removed files are preserved.");
+            } else {
+                logging::log(logging::Level::info, logging::Channel::assets,
+                    "InitFS exported: {} Lua, {} configs; {} created, {} existing files preserved, {} skipped.",
+                    exported.scripts, exported.configs, exported.created, exported.preserved, exported.skipped);
+            }
+        } catch (const std::exception& failure) {
+            // An install under Program Files is the usual reason. Skate plays
+            // without loose scripts; only editing them is lost.
+            loose_files = false;
+            logging::log(logging::Level::warning, logging::Channel::assets,
+                "Loose files are off for this launch: scripts/ and config/ could not be exported ({}). Skate still "
+                "starts; editing them needs a folder ReSkate is allowed to write to.", failure.what());
         }
     }
+    set_environment(L"RESKATE_LOOSE_FILES", loose_files ? L"1" : L"0");
     set_environment(L"RESKATE_LOG_CONSOLE", options.window_console ? L"1" : L"0");
     set_environment(L"RESKATE_LOG_LEVEL", widen(options.log_level).c_str());
     set_environment(L"RESKATE_FORCE_WINDOWED", options.force_windowed ? L"1" : L"0");

@@ -69,6 +69,23 @@ inline Problem explain(std::string_view raw) {
     if (mentions(raw, "need different keys"))
         return {"The menu and console share a key",
                 "Open Settings > KEYS and pick a different key for one of them."};
+    // ERROR_ELEVATION_REQUIRED. Windows localises the text, so match the
+    // number win32_failure puts in front of it.
+    if (mentions(raw, "failed (740)"))
+        return {"Skate.exe is set to always run as administrator",
+                "ReSkate has to start Skate itself, and Windows does not let it start a program marked to "
+                "need administrator. Right-click Skate.exe, pick Properties, then Compatibility, and untick "
+                "\"Run this program as an administrator\". Starting ReSkateLauncher.exe as "
+                "administrator works too."};
+    if (mentions(raw, "LoadLibraryW is hooked")) {
+        std::string advice = "Security software or an overlay is modifying Skate while it starts, and ReSkate will "
+                             "not load itself through that. Allow ReSkateLauncher.exe and Skate.exe in it, or close "
+                             "it, then press RETRY.";
+        // The launcher named what it found in Skate; that is the useful half.
+        if (const auto found = raw.find("Loaded into Skate"); found != std::string_view::npos)
+            advice += " " + std::string(raw.substr(found));
+        return {"Something is hooking Skate as it starts", std::move(advice)};
+    }
     if (mentions(raw, "Skate closed while it was starting"))
         return {"Skate closed while it was starting", std::string(attach_advice)};
     if (mentions(raw, "timed out after"))
@@ -79,6 +96,16 @@ inline Problem explain(std::string_view raw) {
         mentions(raw, "module list") || mentions(raw, "VirtualAllocEx") || mentions(raw, "NtQueryInformationProcess") ||
         mentions(raw, "DingoSDKDebugInitialize") || mentions(raw, "Remote "))
         return {"ReSkate could not attach to Skate", std::string(attach_advice)};
+    // Windows reports a refused write in the user's own language, so these
+    // key on the operation names and the path, which are never translated.
+    const bool write_failure = mentions(raw, "create_directories") || mentions(raw, "create_directory") ||
+                               mentions(raw, "Cannot write") || mentions(raw, "Cannot create") ||
+                               mentions(raw, "Cannot publish") || mentions(raw, "Cannot append") ||
+                               mentions(raw, "Cannot replace");
+    if (write_failure)
+        return {"ReSkate cannot write to its own folder",
+                "Move the whole ReSkate folder somewhere else, such as C:\\Games\\ReSkate, and start it from "
+                "there. Program Files and OneDrive do not let it write."};
     return {std::string(raw),
             "Press RETRY. If it keeps happening, copy the details below and share them with logs\\ReSkate.log "
             "on the ReSkate Discord."};

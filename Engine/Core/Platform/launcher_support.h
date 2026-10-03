@@ -128,6 +128,9 @@ LoaderGate prepare_loader_for_injection(HANDLE process, HANDLE primary_thread,
 
 // Returns the ordinary LoadLibraryW address for a same-architecture suspended
 // child only after verifying the matching KnownDLL mapping and entry bytes.
-std::uintptr_t validated_remote_load_library(HANDLE process);
+// An entry hooked by anti-virus or an overlay is allowed through when the rest
+// of the function is still Windows' own; `note`, when given, is then filled
+// with what was found so the caller can log it.
+std::uintptr_t validated_remote_load_library(HANDLE process, std::string* note = nullptr);
 
 } // namespace dingosdk::launcher
