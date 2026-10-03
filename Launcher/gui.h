@@ -7,7 +7,8 @@
 
 namespace dingosdk::launcher_gui {
 
-// Runs the windowed launcher until the user closes it or Skate starts.
+// Runs the launcher until it is closed. The saved setting can retain it hidden
+// while Skate runs and show it again after the game exits.
 // `arguments` are the launcher's own command-line arguments, kept for a
 // restart after a self-update.
 int run(const launcher_app::Session& session, const std::vector<std::wstring>& arguments);

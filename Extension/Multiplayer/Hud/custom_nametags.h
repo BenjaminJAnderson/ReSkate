@@ -1,5 +1,6 @@
 #pragma once
 #include "Extension/UI/Overlay/overlay.h"
+#include "Extension/Multiplayer/developer_identity.h"
 #include <array>
 #include <cstdint>
 #include <optional>
@@ -22,16 +23,7 @@ inline constexpr std::uint32_t nametag_white = 0xffffffffU, nametag_developer = 
                                nametag_host = 0xffffc85eU,                               // blue
                                nametag_friend = 0xff8ae07bU;                             // green
 inline constexpr std::uint32_t nametag_developer_start = 0xffff206eU; // #6E20FF, IM_COL32 layout
-// ReSkate's developers, by SteamID64 (Steam authenticates it; it cannot be claimed).
-inline constexpr std::array<std::uint64_t, 2> reskate_developers{
-    76561198084159190ULL, // zee_x64
-    76561198255588397ULL, // reglitched
-};
-inline bool reskate_developer(std::uint64_t id) noexcept {
-    for (const auto developer : reskate_developers)
-        if (developer == id) return true;
-    return false;
-}
+
 // Client thread, once per rendered frame: everyone to label and the local skater's position
 // (for distances). Also reads whether the game is hiding its own nametags right now.
 void publish_custom_nametags(std::uintptr_t base, std::vector<NametagPlayer> players,
