@@ -16,7 +16,12 @@ bool cosmetic_diagnostic(const char* operation, const char* reason, std::string_
         auto& seen = cosmetic_runtime().diagnostics;
         const auto key = std::string(operation) + ':' + reason + ':' + std::string(id);
         if (seen.size() < 64 && seen.insert(key).second) {
-            const dingosdk::Json event{{"event", "local_cosmetic_loadout_diagnostic"},
+            // An outfit that was not loaded or not saved is logged as a warning (events named
+            // ..._rejected are), so a player's ordinary log says why; the rest are routine.
+            const std::string_view why(reason);
+            const bool routine = why == "callback_entered" || why == "unchanged" || why == "no_saved_loadout" ||
+                why == "card_only_preset_recovered" || why == "card_is_not_skater_preset";
+            const dingosdk::Json event{{"event", routine ? "local_cosmetic_loadout_diagnostic" : "local_cosmetic_loadout_rejected"},
                 {"operation", operation}, {"reason", reason}, {"preset", id}};
             dingosdk::logging::event(dingosdk::logging::Channel::customization, event.dump().c_str());
         }
