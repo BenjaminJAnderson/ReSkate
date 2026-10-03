@@ -30,16 +30,15 @@ fs::path from_utf8(std::string_view text) {
 
 // The module this code runs in: rebuilding the SDK can change how it merges.
 fs::path sdk_module() {
-    static const char anchor{};
-    HMODULE module{};
-    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                            reinterpret_cast<LPCWSTR>(&anchor), &module))
-        return {};
-    std::wstring name(32768, L'\0');
-    const auto length = GetModuleFileNameW(module, name.data(), static_cast<DWORD>(name.size()));
-    if (!length || length >= name.size()) return {};
-    name.resize(length);
-    return name;
+    // ReSkate.dll beside the running executable, never the module this code
+    // happens to live in. Skate.exe and ReSkateLauncher.exe sit beside it and
+    // both merge; naming different files would mean neither ever reuses the
+    // other's merge, and the work would be done twice on every launch.
+    std::wstring host(32768, wchar_t{});
+    const auto length = GetModuleFileNameW(nullptr, host.data(), static_cast<DWORD>(host.size()));
+    if (!length || length >= host.size()) return {};
+    host.resize(length);
+    return fs::path(host).parent_path() / L"ReSkate.dll";
 }
 
 } // namespace

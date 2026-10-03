@@ -80,7 +80,7 @@ fs::path pick(HWND owner, bool folder) {
     return result;
 }
 
-std::string summary(const mods::Mod& mod, bool excluded = false) {
+std::string summary(const mods::Mod& mod) {
     std::vector<std::string> parts;
     if (!mod.version.empty()) parts.push_back("v" + mod.version);
     if (!mod.author.empty()) parts.push_back("by " + mod.author);
@@ -88,8 +88,6 @@ std::string summary(const mods::Mod& mod, bool excluded = false) {
     else if (mod.provides_layout) parts.push_back("game data");
     if (!mod.park_maps.empty()) parts.push_back(mod.park_maps.size() == 1 ? "1 park" : std::to_string(mod.park_maps.size()) + " parks");
     if (!mod.provides_layout && !mod.provides_levels && mod.park_maps.empty()) parts.push_back("nothing to load");
-    if (excluded) parts.insert(parts.begin(), "NOT LOADED: could not be merged");
-    if (!mod.outdated.empty()) parts.insert(parts.begin(), "OUTDATED: update it for this game version");
     std::string text;
     for (const auto& part : parts) text += (text.empty() ? "" : "  /  ") + part;
     return text;
@@ -165,24 +163,23 @@ void installed_row(const Fonts& fonts, ModsPanel& panel, const thunderstore::Ins
     const auto* package = package_for(panel.store, mod.name);
     const bool update = package && thunderstore::update_available(*package, installed);
 
+    // The same icon the store shows, so a mod looks like itself on both pages.
+    mod_icon(panel, package, ImVec2(start.x + S(48), start.y + (tall - S(52)) * 0.5f), S(52));
+    const float text_x = start.x + S(112);
     const auto title = std::to_string(index + 1) + ".  " + mod.title;
-    draw->AddText(fonts.bold, fonts.bold->FontSize, ImVec2(start.x + S(54), start.y + S(12)),
+    draw->AddText(fonts.bold, fonts.bold->FontSize, ImVec2(text_x, start.y + S(16)),
         entry.enabled ? color::text : color::muted, title.c_str());
-    if (const auto detail = summary(mod, left_out); !detail.empty())
-        draw->AddText(fonts.body, fonts.body->FontSize, ImVec2(start.x + S(54), start.y + S(36)), color::muted,
-            detail.c_str());
+    if (const auto detail = summary(mod); !detail.empty())
+        draw->AddText(fonts.body, fonts.body->FontSize, ImVec2(text_x, start.y + S(40)), color::muted, detail.c_str());
 
     // The widgets that sit on the row, over its Selectable.
-    ImGui::SetCursorScreenPos(ImVec2(start.x + S(16), start.y + (tall - ImGui::GetFrameHeight()) * 0.5f));
+    ImGui::SetCursorScreenPos(ImVec2(start.x + S(14), start.y + (tall - ImGui::GetFrameHeight()) * 0.5f));
     if (ImGui::Checkbox("##enabled", &entry.enabled)) changed = true;
     if (ImGui::IsItemHovered()) ImGui::SetTooltip(entry.enabled ? "Enabled: loads when Skate starts" : "Disabled");
+
+    // Right to left: the load order, then what you can do to the mod.
     const float arrow = ImGui::GetFrameHeight();
-    const float arrows_x = right - S(20) - arrow * 2 - S(6);
-    if (update) {
-        const float pill = badge_width(fonts, "UPDATE");
-        badge(draw, fonts, ImVec2(arrows_x - S(14) - pill, start.y + (tall - fonts.caption->FontSize - S(8)) * 0.5f),
-            "UPDATE");
-    }
+    const float arrows_x = right - S(16) - arrow * 2 - S(6);
     ImGui::SetCursorScreenPos(ImVec2(arrows_x, start.y + (tall - arrow) * 0.5f));
     ImGui::BeginDisabled(index == 0);
     if (ImGui::ArrowButton("##up", ImGuiDir_Up)) { move_from = index; move_to = index - 1; }
@@ -192,6 +189,30 @@ void installed_row(const Fonts& fonts, ModsPanel& panel, const thunderstore::Ins
     ImGui::BeginDisabled(index + 1 == static_cast<int>(panel.list.entries.size()));
     if (ImGui::ArrowButton("##down", ImGuiDir_Down)) { move_from = index; move_to = index + 1; }
     ImGui::EndDisabled();
+
+    const float button = S(104), button_y = start.y + (tall - S(30)) * 0.5f;
+    float next = arrows_x - S(14) - button;
+    ImGui::SetCursorScreenPos(ImVec2(next, button_y));
+    if (ImGui::Button("Uninstall", ImVec2(button, S(30)))) panel.confirm_remove = mod.name;
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Delete this mod's folder (it goes to the Recycle Bin)");
+    if (update) {
+        next -= S(8) + button;
+        ImGui::SetCursorScreenPos(ImVec2(next, button_y));
+        push_primary_button();
+        if (ImGui::Button("UPDATE", ImVec2(button, S(30)))) start_store_install(panel, {*package});
+        pop_primary_button();
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Thunderstore has v%s", package->latest().number.c_str());
+    }
+    float pill_x = next - S(14);
+    const float pill_y = start.y + (tall - fonts.caption->FontSize - S(8)) * 0.5f;
+    const auto pill = [&](const char* label, ImU32 fill) {
+        pill_x -= badge_width(fonts, label);
+        badge(draw, fonts, ImVec2(pill_x, pill_y), label, fill, color::ink);
+        pill_x -= S(8);
+    };
+    if (!mod.outdated.empty()) pill("OUTDATED", color::warning);
+    else if (left_out) pill("NOT LOADED", color::danger);
     ImGui::PopID();
 }
 
@@ -211,6 +232,19 @@ void installed_page(Launcher& launcher, const Fonts& fonts, ModsPanel& panel, co
         ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(color::danger),
             "mods.json could not be read (%s), so the game loads no mods. Any change here rewrites it.",
             panel.list.issue.c_str());
+    std::vector<std::string> dropped;
+    for (const auto& entry : entries)
+        if (entry.enabled && panel.list.excluded.contains(entry.mod.name) && entry.mod.outdated.empty())
+            dropped.push_back(entry.mod.title);
+    if (!dropped.empty()) {
+        std::string names;
+        for (const auto& title : dropped) names += (names.empty() ? "" : ", ") + title;
+        ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(color::danger),
+            dropped.size() == 1 ? "%s did not load: the game could not merge it cleanly, so none of its content is "
+                                  "used. Open it to see what went wrong."
+                                : "%s did not load: the game could not merge them cleanly, so none of their content "
+                                  "is used. Open one to see what went wrong.", names.c_str());
+    }
     if (!panel.list.missing.empty()) {
         std::string missing;
         for (const auto& name : panel.list.missing) missing += (missing.empty() ? "" : ", ") + name;
@@ -230,7 +264,7 @@ void installed_page(Launcher& launcher, const Fonts& fonts, ModsPanel& panel, co
     }
     bool changed = false;
     int move_from = -1, move_to = -1;
-    const float row = S(66);
+    const float row = S(76);
     ImGui::BeginDisabled(installing);
     virtual_rows(static_cast<int>(entries.size()), [&](int) { return row; }, [&](int index, float tall) {
         installed_row(fonts, panel, installed, index, tall, changed, move_from, move_to);
@@ -282,7 +316,7 @@ void mod_overview(const Fonts& fonts, ModsPanel& panel, const thunderstore::Inst
     ImGui::TextUnformatted(mod.title.c_str());
     ImGui::PopTextWrapPos();
     ImGui::PopFont();
-    ImGui::TextDisabled("%s", summary(mod, panel.list.excluded.contains(mod.name)).c_str());
+    ImGui::TextDisabled("%s", summary(mod).c_str());
     ImGui::Spacing();
     if (update) {
         ImGui::BeginDisabled(installing);
@@ -304,7 +338,7 @@ void mod_overview(const Fonts& fonts, ModsPanel& panel, const thunderstore::Inst
     ImGui::BeginDisabled(installing);
     ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(color::danger));
     // The confirmation is its own modal, so this one has to go first.
-    if (ImGui::Button("Remove", ImVec2(0, S(34)))) {
+    if (ImGui::Button("Uninstall", ImVec2(0, S(34)))) {
         const auto name = mod.name;
         close();
         panel.confirm_remove = name;
@@ -372,6 +406,13 @@ void install_modal(const Fonts& fonts, ModsPanel& panel, ImVec2 size) {
     }
     const float fraction = std::clamp(panel.progress.load(), 0.0f, 1.0f);
     const auto time = static_cast<float>(ImGui::GetTime());
+    // Its own window over the page: the page's own draw list renders under
+    // its children, so a panel drawn there would sit beneath the mod list.
+    ImGui::SetNextWindowPos(ImVec2(0, 0));
+    ImGui::SetNextWindowSize(size);
+    ImGui::SetNextWindowFocus();
+    ImGui::Begin("##installing", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBackground);
     auto* draw = ImGui::GetWindowDrawList();
     draw->AddRectFilled(ImVec2(0, 0), size, rgba(4, 6, 9, 0.72f));
     const ImVec2 extent(S(540), S(206));
@@ -392,6 +433,7 @@ void install_modal(const Fonts& fonts, ModsPanel& panel, ImVec2 size) {
     ImGui::SetCursorScreenPos(ImVec2(end.x - S(26) - S(130), end.y - S(24) - S(34)));
     if (ImGui::Button("CANCEL", ImVec2(S(130), S(34)))) panel.cancel = true;
     ImGui::PopStyleColor(3);
+    ImGui::End();
 }
 
 } // namespace
@@ -443,6 +485,85 @@ void start_install(ModsPanel& panel, const fs::path& source, bool replace) {
     });
 }
 
+// What PLAY shows instead of launching when the merge left mods out. The game
+// would leave them out too, silently, three minutes into a loading screen.
+void mods_broken_window(Launcher& launcher, const Fonts& fonts, ImVec2 size, Ui& ui, ModsPanel& panel,
+                        const std::vector<ModProblem>& problems) {
+    const bool one = problems.size() == 1;
+    const float rows = static_cast<float>(problems.size()) * S(52);
+    const auto frame = begin_panel("##mods_broken_panel", size,
+        ImVec2(S(620), std::min(size.y - S(80), S(300) + rows)));
+    panel_title(fonts, one ? "A MOD COULD NOT BE MERGED" : "MODS COULD NOT BE MERGED");
+    ImGui::PushTextWrapPos(0);
+    ImGui::TextDisabled(one
+        ? "This mod cannot be combined with the game's files, so none of its content would load. Skate would "
+          "start without it and never say why."
+        : "These mods cannot be combined with the game's files, so none of their content would load. Skate would "
+          "start without them and never say why.");
+    ImGui::PopTextWrapPos();
+    ImGui::Spacing();
+
+    const float footer = ImGui::GetFrameHeight() + ImGui::GetTextLineHeight() + S(56);
+    ImGui::BeginChild("##broken_list", ImVec2(0, frame.y - ImGui::GetCursorPosY() - footer),
+        ImGuiChildFlags_Borders);
+    for (const auto& problem : problems) {
+        ImGui::PushFont(fonts.bold);
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(color::danger));
+        ImGui::TextUnformatted(problem.title.c_str());
+        ImGui::PopStyleColor();
+        ImGui::PopFont();
+        ImGui::PushTextWrapPos(0);
+        ImGui::TextDisabled("%s", problem.reason.c_str());
+        ImGui::PopTextWrapPos();
+        ImGui::Spacing();
+    }
+    ImGui::EndChild();
+    ImGui::Spacing();
+    ImGui::PushFont(fonts.caption);
+    ImGui::TextDisabled("Reinstall the whole mod folder, or rebuild it with a current ReSkate Studio.");
+    ImGui::PopFont();
+
+    ImGui::SetCursorPosY(frame.y - S(24) - ImGui::GetFrameHeight());
+    // A rejected mods.json is not a mod, so there is nothing to switch off.
+    const bool switchable = std::any_of(problems.begin(), problems.end(),
+        [](const ModProblem& problem) { return !problem.name.empty(); });
+    bool disable = false;
+    if (switchable) {
+        push_primary_button();
+        disable = ImGui::Button(one ? "SWITCH IT OFF AND PLAY" : "SWITCH THEM OFF AND PLAY", ImVec2(S(260), 0));
+        pop_primary_button();
+        ImGui::SameLine(0, S(8));
+    }
+    if (disable) {
+        // mods.json is the game's own switch, so the next launch skips them
+        // without the merge finding out the hard way again.
+        const auto root = launcher_mods::mods_root(launcher.session().paths.directory);
+        auto list = mods::scan_mods(root.parent_path());
+        for (auto& entry : list.entries)
+            for (const auto& problem : problems)
+                if (entry.mod.name == problem.name) entry.enabled = false;
+        try {
+            mods::save_mod_order(root, list.entries);
+            logging::write(logging::Level::info, logging::Channel::launcher,
+                "Mods switched off after a failed merge; launching without them");
+        } catch (const std::exception& failure) {
+            logging::write(logging::Level::warning, logging::Channel::launcher,
+                std::string("Could not switch the mods off: ") + failure.what());
+        }
+        panel.scanned = false;
+        launcher.play_anyway();
+    }
+    if (ImGui::Button("Open Mod Manager", ImVec2(S(160), 0))) {
+        launcher.dismiss_mod_problems();
+        ui.mods = true;
+        panel.tab = 0;
+        panel.scanned = false;
+    }
+    ImGui::SameLine(frame.x - S(28) - S(110));
+    if (ImGui::Button("Play anyway", ImVec2(S(110), 0))) launcher.play_anyway();
+    ImGui::End();
+}
+
 void mods_window(Launcher& launcher, const Fonts& fonts, ImVec2 size, Ui& ui, ModsPanel& panel, HWND window) {
     const auto& session = launcher.session();
     if (!panel.scanned) scan(panel, session);
@@ -451,6 +572,8 @@ void mods_window(Launcher& launcher, const Fonts& fonts, ImVec2 size, Ui& ui, Mo
     // A page, not a panel: the mod list and the Thunderstore browser both want
     // the whole window. It sits at (0, 0), so window and screen space agree.
     const auto frame = begin_page("##mods_panel", size);
+    // Both lists draw mod icons, so both need finished ones uploaded.
+    pump_icons(panel);
     auto* draw = ImGui::GetWindowDrawList();
     const bool installing = panel.installing;
     auto& entries = panel.list.entries;
@@ -491,30 +614,29 @@ void mods_window(Launcher& launcher, const Fonts& fonts, ImVec2 size, Ui& ui, Mo
 
     if (panel.tab == 1) package_overview(fonts, panel, frame, installing);
     else mod_overview(fonts, panel, installed, frame, installing);
-    if (installing) install_modal(fonts, panel, frame);
     if (leave) close();
     if (!installing && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId) && !ImGui::IsAnyItemActive() &&
         ImGui::IsKeyPressed(ImGuiKey_Escape, false)) close();
 
     // ------------------------------------------------ confirmations
-    if (!panel.confirm_remove.empty() && !ImGui::IsPopupOpen("Remove mod")) ImGui::OpenPopup("Remove mod");
+    if (!panel.confirm_remove.empty() && !ImGui::IsPopupOpen("Uninstall mod")) ImGui::OpenPopup("Uninstall mod");
     if (!panel.conflict_name.empty() && !ImGui::IsPopupOpen("Replace mod")) ImGui::OpenPopup("Replace mod");
     ImGui::SetNextWindowSize(ImVec2(S(440), 0));
-    if (ImGui::BeginPopupModal("Remove mod", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove)) {
+    if (ImGui::BeginPopupModal("Uninstall mod", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove)) {
         ImGui::PushTextWrapPos(0);
-        ImGui::Text("Remove \"%s\"? Its folder goes to the Recycle Bin.", panel.confirm_remove.c_str());
+        ImGui::Text("Uninstall \"%s\"? Its folder goes to the Recycle Bin.", panel.confirm_remove.c_str());
         ImGui::PopTextWrapPos();
         ImGui::Spacing();
         if (ImGui::Button("Cancel", ImVec2(S(110), 0))) { panel.confirm_remove.clear(); ImGui::CloseCurrentPopup(); }
         ImGui::SameLine();
         push_primary_button();
-        if (ImGui::Button("REMOVE", ImVec2(S(110), 0))) {
+        if (ImGui::Button("UNINSTALL", ImVec2(S(110), 0))) {
             const auto name = panel.confirm_remove;
             try {
                 launcher_mods::remove(panel.root, name);
                 std::erase_if(entries, [&](const auto& entry) { return entry.mod.name == name; });
                 save(panel);
-                panel.message = "Removed " + name + ". It is in the Recycle Bin if you want it back.";
+                panel.message = "Uninstalled " + name + ". It is in the Recycle Bin if you want it back.";
                 panel.selected = -1;
                 logging::write(logging::Level::info, logging::Channel::launcher, "Mod removed: " + name);
             } catch (const std::exception& failure) {
@@ -556,6 +678,7 @@ void mods_window(Launcher& launcher, const Fonts& fonts, ImVec2 size, Ui& ui, Mo
     }
     g_drag_allowed = !ImGui::IsAnyItemHovered() && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId);
     ImGui::End();
+    if (installing) install_modal(fonts, panel, frame);
 }
 
 } // namespace dingosdk::launcher_gui::detail

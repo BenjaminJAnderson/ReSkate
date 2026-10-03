@@ -181,7 +181,7 @@ bool settings_tile(ImDrawList* draw, const Fonts& fonts, ImVec2 position, ImVec2
 
 // The MODS tile, the biggest after PLAY: a mod browser nobody finds is no use.
 bool mods_tile(ImDrawList* draw, const Fonts& fonts, ImVec2 position, ImVec2 size, bool enabled,
-               const std::string& detail, std::size_t pending) {
+               const std::string& detail, const std::string& mark, bool bad) {
     bool hovered{};
     const bool pressed = tile_hit("##mods", position, size, enabled, hovered);
     const ImVec2 end(position.x + size.x, position.y + size.y);
@@ -193,13 +193,19 @@ bool mods_tile(ImDrawList* draw, const Fonts& fonts, ImVec2 position, ImVec2 siz
     draw->AddText(fonts.tile, fonts.tile->FontSize, ImVec2(position.x + S(18), text_y), color::text, "MOD MANAGER");
     if (!detail.empty()) {
         const float detail_y = text_y + fonts.tile->FontSize + S(6);
-        draw->AddText(fonts.body, fonts.body->FontSize, ImVec2(position.x + S(20), detail_y), color::muted,
-            detail.c_str());
-        if (pending)
+        float room = end.x - S(86);        // the faded icon owns the rest
+        // A mod that did not load says so in the detail's colour; an update
+        // count is short enough for a pill beside it.
+        if (!mark.empty() && !bad) {
+            room -= badge_width(fonts, mark);
             badge(draw, fonts,
-                ImVec2(position.x + S(20) + fonts.body->CalcTextSizeA(fonts.body->FontSize, FLT_MAX, 0, detail.c_str()).x + S(12),
-                    detail_y + (fonts.body->FontSize - fonts.caption->FontSize - S(8)) * 0.5f),
-                pending == 1 ? std::string("1 UPDATE") : std::format("{} UPDATES", pending));
+                ImVec2(room, detail_y + (fonts.body->FontSize - fonts.caption->FontSize - S(8)) * 0.5f),
+                mark, color::blue, color::ink);
+            room -= S(10);
+        }
+        const ImVec4 clip(position.x + S(20), detail_y, room, detail_y + fonts.body->FontSize + S(2));
+        draw->AddText(fonts.body, fonts.body->FontSize, ImVec2(position.x + S(20), detail_y),
+            bad ? color::danger : color::muted, detail.c_str(), nullptr, 0, &clip);
     }
     // The skate tool, faded like the wheel on SETTINGS.
     const ImVec2 centre(end.x - S(46), position.y + size.y * 0.5f);
@@ -232,7 +238,8 @@ void status_tile(const Fonts& fonts, const State& state, ImVec2 position, float 
     case Phase::failed: icon = Icon::fail; accent = color::danger; pill = "PROBLEM"; break;
     case Phase::update_available:
     case Phase::game_missing:
-    case Phase::game_outdated: icon = Icon::warning; accent = color::warning; pill = "ACTION NEEDED"; break;
+    case Phase::game_outdated:
+    case Phase::mods_broken: icon = Icon::warning; accent = color::warning; pill = "ACTION NEEDED"; break;
     default: break;
     }
 
@@ -374,7 +381,7 @@ void frame(Launcher& launcher, const Fonts& fonts, HWND window, Ui& ui, ModsPane
         }
     }
     const bool modal = ui.settings || ui.mods || ui.sign_in || qr_open || state.prompt.has_value() ||
-        ui.steam_offline;
+        ui.steam_offline || state.phase == Phase::mods_broken;
 
     ImGui::SetNextWindowPos(ImVec2(0, 0));
     ImGui::SetNextWindowSize(size);
@@ -419,6 +426,8 @@ void frame(Launcher& launcher, const Fonts& fonts, HWND window, Ui& ui, ModsPane
         label = "CANCEL"; enabled = true; secondary = true;
         detail = state.progress >= 0 ? std::format("Downloading  {:.0f}%", state.progress * 100) : "Downloading";
         break;
+    case Phase::merging: label = "MODS"; enabled = false; detail = "Merging your mods before Skate starts"; break;
+    case Phase::mods_broken: label = "PLAY"; enabled = false; detail = "Waiting on an answer about your mods"; break;
     case Phase::ready:
         label = "PLAY";
         // Release builds install the configured runtime before PLAY appears.
@@ -450,12 +459,25 @@ void frame(Launcher& launcher, const Fonts& fonts, HWND window, Ui& ui, ModsPane
             ++installed;
             if (entry.enabled) ++enabled_mods;
         }
-        ui.mods_updates = updates(mods_panel.store, installed_versions(list)).size();
-        ui.mods_detail = installed ? std::format("{} of {} enabled", enabled_mods, installed)
-                                   : std::string("Browse and install from Thunderstore");
+        // A mod the game threw out of the merge is named here, so nobody has
+        // to wonder which one stopped working.
+        std::vector<std::string> dropped;
+        for (const auto& entry : list.entries)
+            if (entry.enabled && (list.excluded.contains(entry.mod.name) || !entry.mod.outdated.empty()))
+                dropped.push_back(entry.mod.title);
+        const auto pending = updates(mods_panel.store, installed_versions(list)).size();
+        ui.mods_mark_bad = !dropped.empty();
+        ui.mods_mark = !dropped.empty() ? std::string("NOT LOADED")
+                     : pending == 1 ? std::string("1 UPDATE")
+                     : pending ? std::format("{} UPDATES", pending)
+                     : std::string();
+        ui.mods_detail = dropped.size() == 1 ? dropped.front() + " did not load"
+                       : !dropped.empty() ? std::format("{} mods did not load", dropped.size())
+                       : installed ? std::format("{} of {} enabled", enabled_mods, installed)
+                       : std::string("Browse and install from Thunderstore");
         ui.mods_checked = time;
     }
-    if (mods_tile(draw, fonts, mods_position, mods_size, !modal, ui.mods_detail, ui.mods_updates)) {
+    if (mods_tile(draw, fonts, mods_position, mods_size, !modal, ui.mods_detail, ui.mods_mark, ui.mods_mark_bad)) {
         ui.mods = true;
         mods_panel.scanned = false;
     }
@@ -475,6 +497,8 @@ void frame(Launcher& launcher, const Fonts& fonts, HWND window, Ui& ui, ModsPane
     else if (ui.sign_in) sign_in_window(launcher, fonts, size, ui);
     else if (ui.settings) settings_window(launcher, fonts, size, ui, window);
     else if (ui.mods) mods_window(launcher, fonts, size, ui, mods_panel, window);
+    else if (state.phase == Phase::mods_broken)
+        mods_broken_window(launcher, fonts, size, ui, mods_panel, state.mod_problems);
     else if (ui.steam_offline) steam_offline_window(fonts, size, ui);
 }
 

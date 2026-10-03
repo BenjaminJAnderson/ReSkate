@@ -186,7 +186,15 @@ inline constexpr std::array<const char*, 7> log_levels{"trace", "debug", "info",
 // ---------------------------------------------------------------- state
 
 enum class Phase { checking, update_available, updating, game_missing, game_outdated, downloading,
-                   ready, launching, failed };
+                   merging, mods_broken, ready, launching, failed };
+
+// A mod the pre-launch merge could not use, named so nobody has to guess which
+// of their mods stopped working.
+struct ModProblem {
+    std::string name;      // folder under Mods/, so it can be switched off
+    std::string title;
+    std::string reason;
+};
 
 struct State {
     Phase phase{Phase::checking};
@@ -196,6 +204,8 @@ struct State {
     std::vector<std::string> qr;
     std::optional<update::Prompt> prompt;
     std::optional<update::Config> config;
+    // Set when a merge before launch left mods out; PLAY waits on an answer.
+    std::vector<ModProblem> mod_problems;
 };
 
 // Update checks, the Steam download and the game launch, one at a time on a worker thread.
@@ -218,6 +228,13 @@ public:
     void save();
 
     void check();
+    // The merge the game would do at startup, run here so its failures can be
+    // shown and answered. `ignore_mod_problems` plays with them left out.
+    void play_anyway();
+    // Back to READY without launching, so the mod manager can be opened.
+    void dismiss_mod_problems();
+    // Where the game reads Mods from: the game folder, or -dataPath.
+    fs::path mods_data_root() const;
     void apply_updates();
     // `qr` signs in with a QR code; otherwise the saved Steam username is used.
     // The password only lives in memory until DepotDownloader asks for it; it
@@ -247,6 +264,7 @@ private:
     std::atomic<bool> busy_{};
     std::atomic<bool> cancel_{};
     std::atomic<bool> restart_{};
+    std::atomic<bool> ignore_mod_problems_{};
     std::atomic<DWORD> game_{};
     std::atomic<bool> launched_{};
 
@@ -263,6 +281,8 @@ private:
     void run_check();
     void run_updates();
     void run_download(bool validate);
+    // False when mods were left out and the launch should wait for an answer.
+    bool run_mod_merge();
     void run_play();
 };
 
@@ -279,10 +299,11 @@ struct Ui {
     std::array<char, 65> username{};
     std::array<char, 256> password{};
     std::array<char, 16> code{};
-    // The MODS tile's "2 of 3 enabled", re-read every few seconds.
+    // The MOD MANAGER tile's "2 of 3 enabled", re-read every few seconds.
     std::string mods_detail;
-    // Thunderstore updates waiting, for the MODS tile's badge.
-    std::size_t mods_updates{};
+    // Its badge: updates waiting, or mods that did not load, which wins.
+    std::string mods_mark;
+    bool mods_mark_bad{};
     double mods_checked{-100};
     // Steam display name for the name plate, re-read every few seconds.
     std::string steam_name;
@@ -397,6 +418,9 @@ std::vector<const thunderstore::Package*> updates(const Store& store, const thun
 void start_store_install(ModsPanel& panel, std::vector<thunderstore::Package> packages);
 // The package's icon texture, or empty while it loads; uploads finished icons.
 ImTextureID package_icon(ModsPanel& panel, const thunderstore::Package& package);
+// That icon drawn at `position`, or a placeholder square while it loads or
+// when the mod never came from Thunderstore.
+void mod_icon(ModsPanel& panel, const thunderstore::Package* package, ImVec2 position, float size);
 void pump_icons(ModsPanel& panel);
 // The GET MODS page body, under the page header.
 void browse_page(Launcher& launcher, const Fonts& fonts, ModsPanel& panel, float height, bool installing);
@@ -413,6 +437,9 @@ void qr_window(Launcher& launcher, const Fonts& fonts, ImVec2 size, const std::v
 void steam_offline_window(const Fonts& fonts, ImVec2 size, Ui& ui);
 void settings_window(Launcher& launcher, const Fonts& fonts, ImVec2 size, Ui& ui, HWND window);
 void mods_window(Launcher& launcher, const Fonts& fonts, ImVec2 size, Ui& ui, ModsPanel& panel, HWND window);
+// Shown instead of launching when the merge left mods out.
+void mods_broken_window(Launcher& launcher, const Fonts& fonts, ImVec2 size, Ui& ui, ModsPanel& panel,
+                        const std::vector<ModProblem>& problems);
 
 // The main screen: background, tiles, status and whichever panel is open.
 void frame(Launcher& launcher, const Fonts& fonts, HWND window, Ui& ui, ModsPanel& mods_panel);

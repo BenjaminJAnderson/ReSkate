@@ -232,16 +232,6 @@ std::vector<const ts::Package*> visible_packages(const Store& store, const ts::I
 
 constexpr std::array<const char*, 5> sort_names{"Last updated", "Most downloaded", "Newest", "Top rated", "Name"};
 
-// Placed by hand: a row lays its own icon, text and badges out.
-void draw_icon(ModsPanel& panel, const ts::Package& package, ImVec2 position, float size) {
-    const ImVec2 end(position.x + size, position.y + size);
-    auto* draw = ImGui::GetWindowDrawList();
-    if (const auto id = package_icon(panel, package))
-        draw->AddImageRounded(id, position, end, ImVec2(0, 0), ImVec2(1, 1), IM_COL32_WHITE, S(4));
-    else
-        draw->AddRectFilled(position, end, rgba(255, 255, 255, 0.06f), S(4));
-}
-
 // What installing `package` does now: install, update or reinstall.
 std::string action_label(const ts::Package& package, const ts::Installed& installed) {
     const auto found = installed.find(ts::folder_for(package.full_name));
@@ -251,6 +241,16 @@ std::string action_label(const ts::Package& package, const ts::Installed& instal
 }
 
 } // namespace
+
+// Placed by hand: a row lays its own icon, text and badges out.
+void mod_icon(ModsPanel& panel, const thunderstore::Package* package, ImVec2 position, float size) {
+    const ImVec2 end(position.x + size, position.y + size);
+    auto* draw = ImGui::GetWindowDrawList();
+    if (const auto id = package ? package_icon(panel, *package) : ImTextureID{})
+        draw->AddImageRounded(id, position, end, ImVec2(0, 0), ImVec2(1, 1), IM_COL32_WHITE, S(4));
+    else
+        draw->AddRectFilled(position, end, rgba(255, 255, 255, 0.06f), S(4));
+}
 
 void refresh_listing(ModsPanel& panel, double time, bool force) {
     auto& store = panel.store;
@@ -412,7 +412,6 @@ void pick(Store& store, const std::string& full_name, bool on) {
 void browse_page(Launcher& launcher, const Fonts& fonts, ModsPanel& panel, float height, bool installing) {
     auto& store = panel.store;
     const auto installed = installed_versions(panel.list);
-    pump_icons(panel);
 
     // ------------------------------------------------ search, category, sort, refresh
     const float top = ImGui::GetCursorPosY();
@@ -525,7 +524,7 @@ void browse_page(Launcher& launcher, const Fonts& fonts, ModsPanel& panel, float
         }
         const float right = start.x + width;
         const float text_x = start.x + S(82);
-        draw_icon(panel, package, ImVec2(start.x + S(14), start.y + S(11)), S(56));
+        mod_icon(panel, &package, ImVec2(start.x + S(14), start.y + S(11)), S(56));
         draw->AddText(fonts.bold, fonts.bold->FontSize, ImVec2(text_x, start.y + S(10)), color::text,
             package.title().c_str());
         const float title_width =
@@ -611,7 +610,7 @@ void package_overview(const Fonts& fonts, ModsPanel& panel, ImVec2 size, bool in
         store.selected.clear();
         ImGui::CloseCurrentPopup();
     };
-    draw_icon(panel, package, ImGui::GetCursorScreenPos(), S(84));
+    mod_icon(panel, &package, ImGui::GetCursorScreenPos(), S(84));
     ImGui::SetCursorPosX(ImGui::GetCursorPosX() + S(84) + S(16));
     ImGui::BeginGroup();
     ImGui::PushFont(fonts.heading);
