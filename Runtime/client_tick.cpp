@@ -24,6 +24,7 @@
 #include "Extension/Throwdowns/native_throwdowns.h"
 #include "Extension/World/level_loading.h"
 #include "Extension/World/loading_screen.h"
+#include <dxgi.h>
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -122,18 +123,66 @@ void apply_performance_settings() {
         }
     } catch (...) {}
 }
-// The mesh streaming pool holds every render mesh the world has loaded. GraphicsPC.lua fixes it
-// at 532960 KB (520 MB) on every PC quality level, sized for San Van's streamed cells; a big
-// custom map's meshes do not fit, so its level either never finishes loading or waits out the
-// transition's 180 s world-quality timeout (MeshStreamingLoadStateProvider never reports high)
-// and spawns the skater invisible. The pools are re-created from this setting at every level
-// start (FUN_14507a2d0), so raising it before a load is enough; the quality script sets it
-// again whenever graphics settings are applied, so it is kept here. The engine turns it into
-// bytes in 32 bits (PoolSize << 10, plus PoolHeadroomSize), so the combined allocation
-// must remain below 4 GiB. Match the 3.5 GiB PC presets instead of lowering them to 2 GiB.
+// The mesh streaming pool holds every render mesh the world has loaded, in video memory.
+// GraphicsPC.lua fixes it at 532960 KB (520 MB) on every PC quality level, sized for San Van's
+// streamed cells; a big custom map's meshes do not fit, so its level either never finishes
+// loading or waits out the transition's 180 s world-quality timeout
+// (MeshStreamingLoadStateProvider never reports high) and spawns the skater invisible. The pools
+// are re-created from this setting at every level start (FUN_14507a2d0), so raising it before a
+// load is enough; the quality script sets it again whenever graphics settings are applied, so it
+// is kept here. The engine turns it into bytes in 32 bits (PoolSize << 10, plus
+// PoolHeadroomSize), so the combined allocation must remain below 4 GiB.
+// How far it is raised depends on the card: 1.0.0 set 3.5 GiB on every card, the likely cause
+// of older cards resetting the device while loading (DXGI_ERROR_DEVICE_RESET in
+// gameRendBeginFrame on an RX 580, 2026-10-03). A quarter of the card's dedicated memory, from
+// the game's own 520 MB up to 3.5 GiB (from 16 GB cards up); cards of 6 GB or less keep the
+// game's value.
+namespace mesh_pool {
+constexpr std::uint32_t stock_kb = 532960, most_kb = 3584u * 1024u;
+static_assert((std::uint64_t{most_kb} + 24576u) * 1024u <= 0xffffffffull);
+struct Card { std::uint64_t memory{}; std::string name; };
+// The hardware adapter with the most dedicated memory: the one the game renders on (a laptop's
+// integrated GPU has little or none). The game's own dxgi.dll, so nothing new is loaded.
+Card largest_card() {
+    Card card;
+    const auto module = GetModuleHandleW(L"dxgi.dll");
+    using Create = HRESULT(WINAPI*)(REFIID, void**);
+    const auto create = module ? reinterpret_cast<Create>(GetProcAddress(module, "CreateDXGIFactory1")) : nullptr;
+    IDXGIFactory1* factory{};
+    if (!create || FAILED(create(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory))) || !factory) return card;
+    IDXGIAdapter1* adapter{};
+    for (UINT i = 0; factory->EnumAdapters1(i, &adapter) != DXGI_ERROR_NOT_FOUND; ++i) {
+        DXGI_ADAPTER_DESC1 desc{};
+        if (SUCCEEDED(adapter->GetDesc1(&desc)) && !(desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) &&
+            desc.DedicatedVideoMemory > card.memory) {
+            card.memory = desc.DedicatedVideoMemory;
+            card.name.clear();
+            for (const auto* c = desc.Description; *c; ++c) card.name.push_back(*c < 128 ? static_cast<char>(*c) : '?');
+        }
+        adapter->Release();
+    }
+    factory->Release();
+    return card;
+}
+// KiB for the pool on this card, or 0 to keep the game's own value.
+std::uint32_t size_kb(std::uint64_t memory) {
+    constexpr std::uint64_t six_gib = 6ull << 30, slack = 256ull << 20; // "6 GB" cards report a little under
+    if (memory <= six_gib + slack) return 0;
+    return static_cast<std::uint32_t>(std::clamp<std::uint64_t>(memory / 4 / 1024, stock_kb, most_kb));
+}
+}
 void apply_mesh_streaming_pool() {
-    constexpr std::uint32_t pool_kb = 3584u * 1024u; // Exactly 3.5 GiB, expressed in KiB.
-    static_assert((std::uint64_t{pool_kb} + 24576u) * 1024u <= 0xffffffffull);
+    static const auto card = mesh_pool::largest_card();
+    static const auto pool_kb = mesh_pool::size_kb(card.memory);
+    static bool reported = false;
+    if (!reported) {
+        reported = true;
+        dingosdk::logging::log(dingosdk::logging::Level::info, dingosdk::logging::Channel::runtime,
+            "Mesh streaming pool: {} for {} ({:.1f} GB of video memory).",
+            pool_kb ? std::format("{} MB", pool_kb / 1024) : std::string("the game's own 520 MB"),
+            card.name.empty() ? std::string("an unknown card") : card.name, static_cast<double>(card.memory) / (1ull << 30));
+    }
+    if (!pool_kb) return;
     static ULONGLONG next_check = 0;
     static std::string last_result;
     const auto now = GetTickCount64();
@@ -192,8 +241,9 @@ void update_model(std::uintptr_t client, TickState& frame) {
     auto& r = runtime();
     std::uintptr_t vtable{};
     DWORD state{}, game_type{};
-    if (!read(client, vtable) || vtable != r.base + engine::client_vtable || client > highest - 0x2a0 ||
-        !read(client + 0xc4, state) || state > 26 || !read(client + 0xc0, game_type) || game_type > 3) return;
+    // Every client tick: peeked, not read (three ReadProcessMemory calls a tick, profiled 2026-10-02).
+    if (!memory::peek(client, vtable) || vtable != r.base + engine::client_vtable || client > highest - 0x2a0 ||
+        !memory::peek(client + 0xc4, state) || state > 26 || !memory::peek(client + 0xc0, game_type) || game_type > 3) return;
     DWORD no_thread{};
     r.engine_thread.compare_exchange_strong(no_thread, GetCurrentThreadId());
     if (r.engine_thread.load() != GetCurrentThreadId()) return;
@@ -927,7 +977,7 @@ void tick(std::uintptr_t client, std::uintptr_t update) {
                 ? *tick_state.context : native_context(r.base, client, game_type);
         };
         const bool multiplayer_ready=!r.observer_failed && !loading &&
-            read(client+0xc4,state) && (state==13 || state==21) && read(client+0xc0,game_type) &&
+            memory::peek(client+0xc4,state) && (state==13 || state==21) && memory::peek(client+0xc0,game_type) &&
             context_ready();
         {
             DINGO_PROFILE_ZONE("tick/multiplayer");
@@ -939,7 +989,7 @@ void tick(std::uintptr_t client, std::uintptr_t update) {
         // session placed the remote skaters for this frame (and also out of play, to give up).
         std::uintptr_t camera_context{};
         const bool camera_phase = tick_state.camera_issue ? *tick_state.camera_issue == nullptr :
-            read(client + 8, camera_context) && !dingosdk::camera_probe_unavailable_reason(camera_context);
+            memory::peek(client + 8, camera_context) && !dingosdk::camera_probe_unavailable_reason(camera_context);
         {
             DINGO_PROFILE_ZONE("tick/native party");
             dingosdk::multiplayer::tick_native_party_actions(r.base, client,

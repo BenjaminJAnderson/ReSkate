@@ -122,7 +122,6 @@ struct Settings {
     int console_key{static_cast<int>(launcher::default_console_key)};
     int log_level{2};
     std::string arguments;
-    bool close_on_launch{true};
     // Off: never replace ReSkate.dll or the launcher (keeps a test build someone handed out).
     bool updates{true};
     // Off: a crash uploads nothing (RESKATE_CRASH_REPORTING=0 for the launcher and the game).
@@ -158,12 +157,11 @@ public:
     State snapshot();
     bool busy() const { return busy_; }
     bool restart_requested() const { return restart_; }
-    // Process id of the Skate this launcher started, until game_exited().
+    // Process id of the Skate this launcher started, once it exists.
     DWORD game() const { return game_; }
-    // Injection finished and the game is running on its own.
+    // Injection finished and the game is running on its own; the launcher closes
+    // as soon as this is true.
     bool launched() const { return launched_; }
-    // Called once the started game has exited; `seen` if its splash screen ever opened.
-    void game_exited(bool seen);
     Settings& settings() { return settings_; }
     const launcher_app::Session& session() const { return session_; }
     void save();
@@ -236,6 +234,10 @@ struct Ui {
     // Steam display name for the name plate, re-read every few seconds.
     std::string steam_name;
     double steam_checked{-100};
+    // One-time notice that Skate will start offline because Steam is not
+    // running or not signed in. Decided on the first Steam check.
+    bool steam_offline{};
+    bool steam_offline_seen{};
 };
 
 // The Thunderstore listing, fetched in the background when the launcher
@@ -345,6 +347,7 @@ void open_sign_in(Launcher& launcher, Ui& ui, bool validate);
 void sign_in_window(Launcher& launcher, const Fonts& fonts, ImVec2 size, Ui& ui);
 void prompt_window(Launcher& launcher, const Fonts& fonts, ImVec2 size, const update::Prompt& prompt, Ui& ui);
 void qr_window(Launcher& launcher, const Fonts& fonts, ImVec2 size, const std::vector<std::string>& rows);
+void steam_offline_window(const Fonts& fonts, ImVec2 size, Ui& ui);
 void settings_window(Launcher& launcher, const Fonts& fonts, ImVec2 size, Ui& ui);
 void mods_window(Launcher& launcher, const Fonts& fonts, ImVec2 size, Ui& ui, ModsPanel& panel, HWND window);
 

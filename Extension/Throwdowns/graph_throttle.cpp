@@ -162,6 +162,12 @@ void settle(Address base, Address resource, std::size_t index) noexcept {
 }
 } // namespace
 
+bool throttled_graph(std::uint32_t hash) noexcept {
+    for (const auto& graph : graphs)
+        if (graph.hash == hash) return true;
+    return false;
+}
+
 void throttle_graph_ran(Address base, Address vm) noexcept {
     // The pump has just read these for the same run: the expression and its resource are alive.
     if (!vm) return;

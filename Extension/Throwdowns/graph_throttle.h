@@ -21,4 +21,6 @@ namespace dingosdk::multiplayer {
 // Call after every graph run, any realm (the expression pump). Other graphs return after one
 // hash compare, lock free; each loaded copy of the seven above is checked and patched once.
 void throttle_graph_ran(std::uintptr_t base, std::uintptr_t vm) noexcept;
+// Whether the graph with this hash is one of the throttled ones (the pump skips the rest).
+bool throttled_graph(std::uint32_t hash) noexcept;
 } // namespace dingosdk::multiplayer

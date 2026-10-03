@@ -24,14 +24,14 @@ bool gameplay_user_edit();
 
 bool gameplay_setting_key(const void* reference, std::string& key);
 
+// The saved value for a script setting reference, or null: cached per setting asset and profile
+// change on the asking thread (valid until this thread's next call). May throw.
+const dingosdk::Json* saved_gameplay_json(const void* reference);
+
 template<class T> std::optional<T> saved_gameplay_setting(const void* reference) {
-    auto& s = local_runtime();
-    if (!s.active.load(std::memory_order_acquire)) return {};
     PreserveError preserve;
     try {
-        std::string key;
-        if (!gameplay_setting_key(reference, key)) return {};
-        const auto value = s.store->user_value(key);
+        const auto* value = saved_gameplay_json(reference);
         if (!value) return {};
         if constexpr (std::is_same_v<T, bool>) { if (value->is_boolean()) return value->get<bool>(); }
         if constexpr (std::is_same_v<T, float>) {

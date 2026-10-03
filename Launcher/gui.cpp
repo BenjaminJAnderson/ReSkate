@@ -172,23 +172,6 @@ void apply_style() {
     colours[ImGuiCol_NavHighlight] = ImVec4(0, 0, 0, 0);
 }
 
-// True once `process` shows its startup splash (ReSkateStartupWindow) or, if the
-// splash is disabled, the game's own window.
-bool game_window_shown(DWORD process) {
-    struct Search { DWORD process; bool found; } search{process, false};
-    EnumWindows([](HWND window, LPARAM parameter) -> BOOL {
-        auto& target = *reinterpret_cast<Search*>(parameter);
-        DWORD owner{};
-        GetWindowThreadProcessId(window, &owner);
-        if (owner != target.process || !IsWindowVisible(window)) return TRUE;
-        std::array<wchar_t, 64> name{};
-        GetClassNameW(window, name.data(), static_cast<int>(name.size()));
-        const std::wstring_view kind(name.data());
-        if (kind == L"ReSkateStartupWindow" || kind == L"Skate") { target.found = true; return FALSE; }
-        return TRUE;
-    }, reinterpret_cast<LPARAM>(&search));
-    return search.found;
-}
 
 } // namespace
 } // namespace detail
@@ -275,11 +258,6 @@ int run(const launcher_app::Session& session, const std::vector<std::wstring>& a
         auto& ui = *ui_storage;
         ModsPanel mods_panel;
         bool running = true;
-        // The game this launcher started: hide when its splash opens, then exit
-        // (Close the launcher when Skate starts) or wait and return when it closes.
-        HANDLE game{};
-        DWORD game_id{};
-        bool hidden{};
         while (running) {
             MSG message;
             while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
@@ -292,34 +270,12 @@ int run(const launcher_app::Session& session, const std::vector<std::wstring>& a
                 launcher.restart();
                 break;
             }
-            if (!game && launcher.game()) {
-                game_id = launcher.game();
-                game = OpenProcess(SYNCHRONIZE, FALSE, game_id);
-            }
-            if (game) {
-                if (!hidden && game_window_shown(game_id)) {
-                    ShowWindow(window, SW_HIDE);
-                    hidden = true;
-                }
-                // Exit only after injection succeeded, so a failed launch can still report.
-                if (hidden && launcher.launched() && launcher.settings().close_on_launch) break;
-                if (hidden && !launcher.busy() && launcher.snapshot().phase == Phase::failed) {
-                    ShowWindow(window, SW_SHOWNORMAL);
-                    SetForegroundWindow(window);
-                    hidden = false;
-                }
-                if (WaitForSingleObject(game, 0) == WAIT_OBJECT_0) {
-                    CloseHandle(game);
-                    game = nullptr;
-                    launcher.game_exited(hidden);
-                    if (hidden) {
-                        ShowWindow(window, SW_SHOWNORMAL);
-                        SetForegroundWindow(window);
-                        hidden = false;
-                    }
-                }
-            }
-            if (hidden || IsIconic(window)) { Sleep(hidden ? 100 : 50); continue; }
+            // The launcher is done the moment injection succeeded and Skate is running
+            // on its own, so close immediately instead of staying beside the game. This
+            // is the earliest safe point: a launch that fails never sets launched(), so
+            // it still gets to report itself in the window.
+            if (launcher.launched()) break;
+            if (IsIconic(window)) { Sleep(50); continue; }
             ImGui_ImplDX12_NewFrame();
             ImGui_ImplWin32_NewFrame();
             ImGui::NewFrame();
@@ -328,7 +284,6 @@ int run(const launcher_app::Session& session, const std::vector<std::wstring>& a
             renderer.render();
         }
         ShowWindow(window, SW_HIDE);
-        if (game) CloseHandle(game);
         launcher.cancel();
         // Closing the window with Settings still open must not lose changes.
         try { launcher.save(); } catch (...) {}

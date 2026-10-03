@@ -1,5 +1,4 @@
 #include "Engine/Core/Log/logging.h"
-#include "Engine/Core/Profiling/profiler.h"
 #include "Extension/Customization/local_customization_runtime.h"
 #include "Extension/Profile/runtime_internal.h"
 #include "local_challenge_runtime.h"
@@ -27,32 +26,28 @@ thread_local std::uintptr_t executing_expression{};
 
 thread_local const ExpressionExecutionScope* expression_scope{};
 
+// Both hooks run for every expression the game executes, thousands a frame on several threads:
+// no profiler zones here (each was two timestamp reads and shared atomic adds whenever the
+// profiler ran, which inflated the hooks in the very samples that measured them, 2026-10-03).
+// The sampler attributes their time.
 void execute_expression_hook(std::uintptr_t vm, std::uint32_t pc) {
     // The setup helper only prepares registers. Native calls actually execute
     // in 1416d0b90 / 1416d1a10, including direct ECS interpreter entry paths.
     // Keep the exact cursor and profiler context when entering either runner.
     ExpressionExecutionScope scope(vm);
-    {
-        DINGO_PROFILE_ZONE("hooks/expression start");
-        initialize_starter_from_expression(vm, pc);
-    }
+    initialize_starter_from_expression(vm, pc);
     multiplayer::execute_native_party_expression(vm, pc, 0,
         [](std::uintptr_t expression, std::uint32_t cursor, std::uintptr_t) {
             local_runtime().execute_expression(expression, cursor);
         });
-    DINGO_PROFILE_ZONE("hooks/expression end");
     deliver_local_challenge_completion(vm, pc);
     multiplayer::complete_native_throwdown_parameters(vm);
 }
 
 void execute_profiled_expression_hook(std::uintptr_t vm, std::uint32_t pc, std::uintptr_t profiler) {
     ExpressionExecutionScope scope(vm);
-    {
-        DINGO_PROFILE_ZONE("hooks/expression start");
-        initialize_starter_from_expression(vm, pc);
-    }
+    initialize_starter_from_expression(vm, pc);
     multiplayer::execute_native_party_expression(vm, pc, profiler, local_runtime().execute_profiled_expression);
-    DINGO_PROFILE_ZONE("hooks/expression end");
     deliver_local_challenge_completion(vm, pc);
     multiplayer::complete_native_throwdown_parameters(vm);
 }

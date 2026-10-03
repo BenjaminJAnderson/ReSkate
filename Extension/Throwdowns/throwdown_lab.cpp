@@ -1688,11 +1688,31 @@ void trace_expression(Address vm) {
     if (!seen.count++) seen.first_ms = now;
     seen.last_ms = now;
 }
+
+// The pump runs after every expression the game executes, thousands a frame, and almost all
+// are none of the graphs it watches: one sorted lookup of the running graph decides
+// (~0.5% of a busy multiplayer client frame before, profiled 2026-10-03). Keep this list in
+// step with the graphs the pump's body compares. The handled graphs' zero padding stays in, as
+// the body's search also matched a graph of 0.
+bool lab_graph(Address vm) noexcept {
+    static const auto watched = [] {
+        std::vector<std::uint32_t> v{graph_celebration, graph_criteria_attempt, graph_queue_filled, graph_round_end_update,
+                                     graph_turn_start, graph_skate_timer, graph_turn_end_begin,
+                                     0xc33322b2, 0xc4a37359, 0xcc6467cf, 0xf073dd02};
+        for (const auto& h : handled_events) v.insert(v.end(), h.graphs.begin(), h.graphs.end());
+        std::ranges::sort(v);
+        v.erase(std::unique(v.begin(), v.end()), v.end());
+        return v;
+    }();
+    const auto resource = *reinterpret_cast<const Address*>(vm + 0x38);
+    const auto graph = resource ? *reinterpret_cast<const std::uint32_t*>(resource + 0x10) : 0U;
+    return std::ranges::binary_search(watched, graph) || (resource && throttled_graph(graph));
+}
 } // namespace
 
 void pump_throwdown_lab(Address vm) noexcept {
     auto& l = lab();
-    if (vm && l.installed.load(std::memory_order_acquire)) {
+    if (vm && l.installed.load(std::memory_order_acquire) && lab_graph(vm)) {
         profile_runtime::PreserveError preserve;
         try {
             const auto resource = *reinterpret_cast<const Address*>(vm + 0x38);

@@ -313,7 +313,18 @@ void frame(Launcher& launcher, const Fonts& fonts, HWND window, Ui& ui, ModsPane
         }
         g_dropped.clear();
     }
-    const bool modal = ui.settings || ui.mods || ui.sign_in || qr_open || state.prompt.has_value();
+    // The Steam name for the plate, and the one-time offline notice, both come
+    // from the first Steam check; steam_offline_seen keeps it to one decision.
+    if (time - ui.steam_checked > 5) {
+        ui.steam_name = launcher_app::steam_persona_name();
+        ui.steam_checked = time;
+        if (!ui.steam_offline_seen) {
+            ui.steam_offline_seen = true;
+            ui.steam_offline = !launcher.settings().offline && !launcher_app::steam_signed_in();
+        }
+    }
+    const bool modal = ui.settings || ui.mods || ui.sign_in || qr_open || state.prompt.has_value() ||
+        ui.steam_offline;
 
     ImGui::SetNextWindowPos(ImVec2(0, 0));
     ImGui::SetNextWindowSize(size);
@@ -329,10 +340,6 @@ void frame(Launcher& launcher, const Fonts& fonts, HWND window, Ui& ui, ModsPane
     std::string version = "Development build";
     if (update::binary_updates_enabled() && state.config && !state.config->launcher.version.empty())
         version = "Launcher " + state.config->launcher.version;
-    if (time - ui.steam_checked > 5) {
-        ui.steam_name = launcher_app::steam_persona_name();
-        ui.steam_checked = time;
-    }
     const bool greet = !launcher.settings().offline && !ui.steam_name.empty();
     draw_plate(draw, fonts, ImVec2(S(50), S(40)), greet ? "Welcome, " + ui.steam_name : std::string("ReSkate"), version);
     draw_title(draw, fonts, ImVec2(S(52), S(88)), "RESKATE");
@@ -417,6 +424,7 @@ void frame(Launcher& launcher, const Fonts& fonts, HWND window, Ui& ui, ModsPane
     else if (ui.sign_in) sign_in_window(launcher, fonts, size, ui);
     else if (ui.settings) settings_window(launcher, fonts, size, ui);
     else if (ui.mods) mods_window(launcher, fonts, size, ui, mods_panel, window);
+    else if (ui.steam_offline) steam_offline_window(fonts, size, ui);
 }
 
 } // namespace dingosdk::launcher_gui::detail

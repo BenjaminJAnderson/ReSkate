@@ -87,9 +87,11 @@ struct Peer {
     ReceiveBudget budget;
     PoseBuffer poses;
     Pose render_pose;
-    // Far from the local skater and the camera, render_pose is sampled every
-    // far_interval (0: every frame) and the skater keeps it in between.
+    // Far from the local skater and the camera, or out of the camera's view, render_pose is
+    // sampled every far_interval (0: every frame) and the skater keeps it in between.
     std::uint64_t far_interval{}, next_far_sample{};
+    // far_interval is only for being out of view: coming into view samples at once.
+    bool far_for_view{};
     AppearanceBuffer appearance;
     // Bumped per accepted outfit; render compares it with the one its actor wears
     // (0 after a spawn) to spread native recipe applies over frames.

@@ -21,13 +21,14 @@ bool population_config_identity(std::uintptr_t config) {
     // The validated manager supplies a TrafficSystemConfig, but the asset name
     // varies by map (BAM uses Gameplay/AI/BAM_TrafficSystemConfig). The exact
     // native class identifies the field layout; the default asset name does not.
-    return read(config + 8, type) && type == local_runtime().base + addr::population::traffic_system_config_type &&
+    return memory::peek(config + 8, type) && type == local_runtime().base + addr::population::traffic_system_config_type &&
         identifier(reinterpret_cast<void*>(config + 0x18), name);
 }
 
+// Every population tick, on the validated live config: peeked.
 bool population_value(std::uintptr_t config, unsigned i, float& out) {
-    if (i == 0 || i == 3) return read(config + population_offsets[i], out) && std::isfinite(out) && out >= 0 && out <= 100;
-    std::uint32_t v{}; if (!read(config + population_offsets[i], v) || v > 1000) return false; out = static_cast<float>(v); return true;
+    if (i == 0 || i == 3) return memory::peek(config + population_offsets[i], out) && std::isfinite(out) && out >= 0 && out <= 100;
+    std::uint32_t v{}; if (!memory::peek(config + population_offsets[i], v) || v > 1000) return false; out = static_cast<float>(v); return true;
 }
 
 bool population_write(std::uintptr_t config, unsigned i, float value) {
