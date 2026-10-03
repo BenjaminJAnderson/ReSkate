@@ -238,8 +238,8 @@ void Launcher::fail(const std::string& message) {
     logging::write(logging::Level::error, logging::Channel::launcher, message);
     std::lock_guard lock(mutex_);
     state_.phase = Phase::failed;
-    state_.status = message;
-    state_.detail = "See logs\\ReSkate.log for details.";
+    state_.status = message;   // raw: the STATUS tile explains it and can copy it
+    state_.detail.clear();
     state_.progress = -1;
     state_.qr.clear();
 }

@@ -34,8 +34,11 @@ namespace update = launcher_update;
 
 // ---------------------------------------------------------------- look
 
-constexpr float design_width = 1180.0f;
-constexpr float design_height = 680.0f;
+// The window's size at scale 1. Everything is laid out in these units and
+// multiplied by g_scale, which gui.cpp lowers when the design size would not
+// fit the screen's work area.
+constexpr float design_width = 1440.0f;
+constexpr float design_height = 840.0f;
 
 inline ImU32 rgba(int r, int g, int b, float a = 1.0f) {
     return IM_COL32(r, g, b, static_cast<int>(std::clamp(a, 0.0f, 1.0f) * 255.0f));
@@ -92,8 +95,54 @@ class Renderer;
 inline Renderer* g_renderer{};
 
 void panel_title(const Fonts& fonts, const char* text);
+// Brushed title, tilted like the HUB's; `position` is in screen space, and
+// `size` zero means the title font's own. Newlines start a new line.
+void page_title(ImDrawList* draw, const Fonts& fonts, ImVec2 position, const char* text, float size = 0);
 // A centred modal panel; returns its size.
 ImVec2 begin_panel(const char* id, ImVec2 size, ImVec2 panel);
+// A page filling the whole window, for screens that outgrew a modal panel
+// (Mods). Returns its size, so it lays out like a panel.
+ImVec2 begin_page(const char* id, ImVec2 size);
+// Minimise and close in the top-right corner. A page draws its own: it covers
+// the main screen's.
+void window_buttons(ImDrawList* draw, HWND window, ImVec2 size);
+// An invisible button at an absolute screen position, for a tile drawn by hand.
+bool tile_hit(const char* id, ImVec2 position, ImVec2 size, bool enabled, bool& hovered);
+// A tile in a page's nav rail, blue while its page is open, like skate.'s
+// selected tile. Leaves the cursor where the next tile goes.
+bool nav_tile(const Fonts& fonts, float width, const char* label, bool selected, const std::string& count = {},
+              bool accent = false, const std::string& tip = {});
+// A pill with a count or a short word, like the badges on a mod manager's nav.
+float badge_width(const Fonts& fonts, const std::string& text);
+void badge(ImDrawList* draw, const Fonts& fonts, ImVec2 position, const std::string& text,
+           ImU32 fill = color::blue, ImU32 ink = color::ink);
+// A caption over its value: the detail lines of an open list row.
+void field(const Fonts& fonts, const char* name, const std::string& value);
+// One row of a mod list: its background, a hover tint, a rule under it and a
+// blue edge when it is ticked. Returns true when the row itself was clicked,
+// which opens the mod's overview; the widgets drawn over it keep their clicks.
+bool list_row(const char* id, float width, float height, bool ticked);
+
+// Draws only the rows a scrolling child actually shows. Unlike ImGuiListClipper
+// this copes with rows of different heights, which one open row needs.
+template<class Height, class Row>
+void virtual_rows(int count, Height height, Row row) {
+    // Both axes: a row leaves the cursor wherever its last widget was.
+    const ImVec2 start = ImGui::GetCursorPos();
+    const float scroll = ImGui::GetScrollY(), view = ImGui::GetWindowHeight();
+    float y = start.y;
+    for (int index = 0; index < count; ++index) {
+        const float tall = height(index);
+        if (y + tall >= scroll && y <= scroll + view) {
+            ImGui::SetCursorPos(ImVec2(start.x, y));
+            row(index, tall);
+        }
+        y += tall;
+    }
+    // An item at the end, so the child scrolls over every row and no further.
+    ImGui::SetCursorPos(ImVec2(start.x, y));
+    ImGui::Dummy(ImVec2(1, 0));
+}
 void open_path(const fs::path& path);
 // Opens an https:// page in the default browser; anything else is ignored.
 void open_url(std::string_view url);
@@ -232,6 +281,8 @@ struct Ui {
     std::array<char, 16> code{};
     // The MODS tile's "2 of 3 enabled", re-read every few seconds.
     std::string mods_detail;
+    // Thunderstore updates waiting, for the MODS tile's badge.
+    std::size_t mods_updates{};
     double mods_checked{-100};
     // Steam display name for the name plate, re-read every few seconds.
     std::string steam_name;
@@ -259,11 +310,13 @@ struct Store {
     std::vector<thunderstore::Package> packages;
     double fetched{-1e9};                            // ImGui time the last fetch started
 
-    // The BROWSE page.
+    // The GET MODS page.
     std::array<char, 96> search{};
     std::string category;                            // empty = all
     int sort{};
-    std::string selected;                            // full_name
+    std::string selected;                            // full_name, while its overview is open
+    bool overview{};                                 // the overview popup is showing
+    std::vector<std::string> picked;                 // ticked, to install in one go
 
     ~Store() {
         stop = true;
@@ -297,8 +350,9 @@ struct ModsPanel {
     bool scanned{};
     fs::path root;
     mods::ModList list;
-    int selected{-1};
-    int tab{};                           // 0 INSTALLED, 1 BROWSE
+    int selected{-1};                    // the mod whose overview is open
+    bool overview{};                     // the overview popup is showing
+    int tab{};                           // 0 MY MODS, 1 GET MODS
     std::string message;
     bool message_error{};
     std::string confirm_remove;          // folder awaiting "Remove" confirmation
@@ -325,6 +379,8 @@ struct ModsPanel {
 };
 
 void scan(ModsPanel& panel, const launcher_app::Session& session);
+// Re-reads the Mods folder and the Thunderstore listing.
+void refresh_mods(Launcher& launcher, ModsPanel& panel);
 void start_install(ModsPanel& panel, const fs::path& source, bool replace);
 
 // ---------------------------------------------------------------- Thunderstore (gui_mods_browse.cpp)
@@ -342,15 +398,20 @@ void start_store_install(ModsPanel& panel, std::vector<thunderstore::Package> pa
 // The package's icon texture, or empty while it loads; uploads finished icons.
 ImTextureID package_icon(ModsPanel& panel, const thunderstore::Package& package);
 void pump_icons(ModsPanel& panel);
-// The BROWSE page body, between the tabs and the footer.
-void browse_page(const Fonts& fonts, ModsPanel& panel, float height, bool installing);
+// The GET MODS page body, under the page header.
+void browse_page(Launcher& launcher, const Fonts& fonts, ModsPanel& panel, float height, bool installing);
+// Everything Thunderstore knows about one package, in a popup over the page.
+void package_overview(const Fonts& fonts, ModsPanel& panel, ImVec2 size, bool installing);
+// Whether `package` is ticked for the next install, and ticking it.
+bool picked(const Store& store, const std::string& full_name);
+void pick(Store& store, const std::string& full_name, bool on);
 
 void open_sign_in(Launcher& launcher, Ui& ui, bool validate);
 void sign_in_window(Launcher& launcher, const Fonts& fonts, ImVec2 size, Ui& ui);
 void prompt_window(Launcher& launcher, const Fonts& fonts, ImVec2 size, const update::Prompt& prompt, Ui& ui);
 void qr_window(Launcher& launcher, const Fonts& fonts, ImVec2 size, const std::vector<std::string>& rows);
 void steam_offline_window(const Fonts& fonts, ImVec2 size, Ui& ui);
-void settings_window(Launcher& launcher, const Fonts& fonts, ImVec2 size, Ui& ui);
+void settings_window(Launcher& launcher, const Fonts& fonts, ImVec2 size, Ui& ui, HWND window);
 void mods_window(Launcher& launcher, const Fonts& fonts, ImVec2 size, Ui& ui, ModsPanel& panel, HWND window);
 
 // The main screen: background, tiles, status and whichever panel is open.
