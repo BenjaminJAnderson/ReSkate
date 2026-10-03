@@ -239,9 +239,7 @@ bool mods_tile(ImDrawList* draw, const Fonts& fonts, ImVec2 position, ImVec2 siz
 }
 
 // The STATUS tile, laid out like the HUB's BOUNTIES tile: a header and icon rows.
-// `steam_offline`: Steam isn't running or signed in, so PLAY starts offline.
-void status_tile(ImDrawList* draw, const Fonts& fonts, const State& state, ImVec2 position, float width, float time,
-                 bool steam_offline) {
+void status_tile(ImDrawList* draw, const Fonts& fonts, const State& state, ImVec2 position, float width, float time) {
     struct Row { Icon icon; std::string text; std::string detail; };
     std::vector<Row> rows;
     Icon now = Icon::busy;
@@ -254,11 +252,6 @@ void status_tile(ImDrawList* draw, const Fonts& fonts, const State& state, ImVec
     default: break;
     }
     rows.push_back({now, state.status, state.detail});
-    // While launching, the status detail already says the game is starting offline.
-    if (steam_offline && state.phase != Phase::launching)
-        rows.push_back({Icon::warning, "Steam isn't open or signed in",
-            "PLAY starts skate. in offline mode as Unknown Player; multiplayer is hidden. "
-            "Open Steam and sign in to play online."});
     if (state.config) {
         const auto build = state.config->game.build_id.empty() ? state.config->game.manifest_id : state.config->game.build_id;
         const bool game_ok = state.phase != Phase::game_missing && state.phase != Phase::game_outdated &&
@@ -337,8 +330,7 @@ void frame(Launcher& launcher, const Fonts& fonts, HWND window, Ui& ui, ModsPane
     if (update::binary_updates_enabled() && state.config && !state.config->launcher.version.empty())
         version = "Launcher " + state.config->launcher.version;
     if (time - ui.steam_checked > 5) {
-        ui.steam_signed_in = launcher_app::steam_signed_in();
-        ui.steam_name = ui.steam_signed_in ? launcher_app::steam_persona_name() : std::string();
+        ui.steam_name = launcher_app::steam_persona_name();
         ui.steam_checked = time;
     }
     const bool greet = !launcher.settings().offline && !ui.steam_name.empty();
@@ -414,8 +406,7 @@ void frame(Launcher& launcher, const Fonts& fonts, HWND window, Ui& ui, ModsPane
         (ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false))) act();
     ImGui::EndDisabled();
 
-    status_tile(draw, fonts, state, ImVec2(S(60), S(200)), S(360), time,
-                !ui.steam_signed_in && !launcher.settings().offline);
+    status_tile(draw, fonts, state, ImVec2(S(60), S(200)), S(360), time);
 
     if (modal) draw->AddRectFilled(ImVec2(0, 0), size, rgba(4, 6, 9, 0.72f));
     g_drag_allowed = !modal && !ImGui::IsAnyItemHovered();

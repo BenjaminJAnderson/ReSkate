@@ -11,7 +11,6 @@
 #include "Engine/Game/World/park_rotation.h"
 #include "Engine/Game/World/world_layers.h"
 #include <array>
-#include <cmath>
 #include <cstdint>
 #include <deque>
 #include <optional>
@@ -214,29 +213,7 @@ std::optional<Packet> decode(std::span<const std::uint8_t>) noexcept;
 bool newer_sequence(std::uint32_t candidate, std::uint32_t previous) noexcept;
 std::uint64_t map_hash(std::string_view) noexcept;
 bool valid_map_destination(std::string_view) noexcept;
-// Normalized lerp between two transforms. Runs for every joint of every remote player each
-// frame, so it is inline and plain arithmetic (std::lerp's edge-case branches and a divide
-// per component were ~1% of a multiplayer client frame, profiled 2026-10-02).
-inline Transform interpolate(const Transform &a, const Transform &b, float t) {
-    Transform out;
-    t = t < 0.0f ? 0.0f : t > 1.0f ? 1.0f : t;
-    for (unsigned i = 0; i < 3; ++i) {
-        out.position[i] = a.position[i] + (b.position[i] - a.position[i]) * t;
-        out.scale[i] = a.scale[i] + (b.scale[i] - a.scale[i]) * t;
-    }
-    const float dot = a.rotation[0] * b.rotation[0] + a.rotation[1] * b.rotation[1] +
-                      a.rotation[2] * b.rotation[2] + a.rotation[3] * b.rotation[3];
-    const float sign = dot < 0 ? -1.0f : 1.0f;
-    float norm{};
-    for (unsigned i = 0; i < 4; ++i) {
-        out.rotation[i] = a.rotation[i] + (sign * b.rotation[i] - a.rotation[i]) * t;
-        norm += out.rotation[i] * out.rotation[i];
-    }
-    const float inverse = 1.0f / std::sqrt(norm);
-    for (float &v : out.rotation)
-        v *= inverse;
-    return out;
-}
+Transform interpolate(const Transform &, const Transform &, float);
 void offset_pose(Pose &, const std::array<float, 3> &);
 std::array<float, 16> to_matrix(const Transform &);
 Transform from_matrix(const std::array<float, 16> &);

@@ -8,7 +8,6 @@
 #include <algorithm>
 #include <Windows.h>
 #include <array>
-#include <atomic>
 #include <cmath>
 #include <fstream>
 #include <limits>
@@ -257,9 +256,6 @@ std::string with_cached_entitlements(std::string text) {
 std::string_view embedded_defaults() noexcept {
     return {reinterpret_cast<const char*>(embedded_profile_defaults), sizeof(embedded_profile_defaults)};
 }
-namespace {
-std::atomic<std::uint64_t> store_changes{1};
-}
 Store::Store(std::filesystem::path path, const std::filesystem::path& defaults) : path_(storage::database_path(std::move(path))),
     database_(std::make_unique<storage::SaveDatabase>(path_, database::profile_schema())) {
     const auto seed = decode(with_cached_entitlements(defaults.empty() || !std::filesystem::exists(defaults) ?
@@ -287,10 +283,8 @@ Store::Store(std::filesystem::path path, const std::filesystem::path& defaults) 
     if (next.extensions.contains("location_travel") && next.extensions.at("location_travel").is_object())
         for (const auto* key : {"destinations", "access_points"}) next.extensions.at("location_travel").erase(key);
     if (!database_->exists() || next != value_) commit(std::move(next));
-    store_changes.fetch_add(1, std::memory_order_release);
 }
 Store::~Store() = default;
-std::uint64_t Store::changes() noexcept { return store_changes.load(std::memory_order_acquire); }
 Snapshot Store::snapshot() const { std::lock_guard lock(mutex_); return value_; }
 std::shared_ptr<const Snapshot> Store::shared_snapshot() const {
     std::lock_guard lock(mutex_);
@@ -458,7 +452,6 @@ void Store::commit(Snapshot next) {
     if (database_->exists()) database_->commit(std::move(tables));
     else database_->initialize(std::move(tables));
     value_ = std::move(next);
-    store_changes.fetch_add(1, std::memory_order_release);
 }
 
 }

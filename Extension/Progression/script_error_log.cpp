@@ -14,7 +14,7 @@ void script_error(std::uintptr_t, std::uintptr_t*, std::uintptr_t* arguments) {
     PreserveError preserve;
     // Authored graphs raise the same error every frame, from the same constant text: a text
     // pointer already looked at is not read again (each character was a system call).
-    static std::mutex mutex; static std::set<std::string> seen; static std::set<std::uintptr_t> looked_at, arguments_seen;
+    static std::mutex mutex; static std::set<std::string> seen; static std::set<std::uintptr_t> looked_at;
     std::lock_guard lock(mutex);
     try {
         // The message position is not known from the binding alone; take the
@@ -35,10 +35,6 @@ void script_error(std::uintptr_t, std::uintptr_t*, std::uintptr_t* arguments) {
         for (std::size_t index = 0; arguments && index < 4 && message.empty(); ++index) {
             std::uintptr_t argument{}, inner{};
             if (!memory::peek(reinterpret_cast<std::uintptr_t>(arguments) + index * 8, argument) || argument < 0x10000) break;
-            // The same arguments come back every frame: each is probed once (read, not peeked:
-            // it is often not a pointer, and a failed peek costs an exception).
-            if (arguments_seen.contains(argument)) continue;
-            if (arguments_seen.size() < 4096) arguments_seen.insert(argument);
             if (read(argument, inner) && inner >= 0x10000) message = printable(inner);
             if (message.empty()) message = printable(argument);
         }

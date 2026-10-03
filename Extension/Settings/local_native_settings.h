@@ -17,7 +17,7 @@ unsigned native_settings_location(std::uintptr_t group);
 
 template<class T> std::optional<dingosdk::Json> native_scalar(const void* data) {
     T value{};
-    if (!memory::peek(reinterpret_cast<std::uintptr_t>(data), value)) return {};
+    if (!read(reinterpret_cast<std::uintptr_t>(data), value)) return {};
     if constexpr (std::is_floating_point_v<T>) if (!std::isfinite(value)) return {};
     if constexpr (std::is_same_v<T, std::uint64_t>) if (value > INT64_MAX) return {};
     return dingosdk::Json(value);

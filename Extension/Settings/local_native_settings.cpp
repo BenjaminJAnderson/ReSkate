@@ -6,9 +6,6 @@
 #include "Engine/Game/Build/20260929/local_native_settings.h"
 #include "Engine/Game/Build/20260929/named_settings.h"
 #include "local_user_settings.h"
-#include <optional>
-#include <string_view>
-#include <array>
 
 namespace dingosdk::profile_runtime {
 namespace native_types = addr::named_settings;
@@ -33,63 +30,30 @@ unsigned native_settings_location(std::uintptr_t group) {
     return 0;
 }
 
-// Runs on every settings get the game's scripts make: peeked, not read (one ReadProcessMemory
-// call per read, ~0.15% of a multiplayer client frame, profiled 2026-10-02).
 std::optional<dingosdk::Json> native_setting_json(const NativeSettingValue* input) {
     NativeSettingValue value{};
-    if (!memory::peek(reinterpret_cast<std::uintptr_t>(input), value) || !value.data) return {};
+    if (!read(reinterpret_cast<std::uintptr_t>(input), value) || !value.data) return {};
     const auto type = value.type - local_runtime().base;
     switch (type) {
     case native_types::native_bool: {
         std::uint8_t byte{};
-        if (memory::peek(reinterpret_cast<std::uintptr_t>(value.data), byte) && byte <= 1) return byte != 0;
+        if (read(reinterpret_cast<std::uintptr_t>(value.data), byte) && byte <= 1) return byte != 0;
         return {};
     }
     case native_types::native_uint32: return native_scalar<std::uint32_t>(value.data);
     case native_types::native_int32: return native_scalar<std::int32_t>(value.data);
     case native_types::native_float32: return native_scalar<float>(value.data);
     case native_types::native_cstring: {
-        std::uintptr_t text{};
-        if (!memory::peek(reinterpret_cast<std::uintptr_t>(value.data), text)) return {};
-        char buffer[4097];
-        const auto length = memory::peek_cstring(text, buffer, sizeof(buffer));
-        if (length < 0) return {};
-        return std::string(buffer, static_cast<std::size_t>(length));
+        std::uintptr_t text{}; std::string result;
+        if (!read(reinterpret_cast<std::uintptr_t>(value.data), text)) return {};
+        for (std::size_t i = 0; i <= 4096; ++i) {
+            char c{}; if (!read(text + i, c)) return {};
+            if (!c) return result;
+            result += c;
+        }
     }
     }
     return {};
-}
-
-namespace {
-// The saved option for a native setting key, or null: one store lookup per key and profile change,
-// cached on the asking thread in a small direct-mapped table (valid until this thread's next call).
-// A hit needs the same key address, location and first 8 key bytes; the key text is read only on
-// a miss. May throw.
-const dingosdk::Json* saved_native_option(unsigned location, const char* key) {
-    const auto address = reinterpret_cast<std::uintptr_t>(key);
-    std::uint64_t prefix{};
-    (void)memory::peek(address, prefix); // a short key at the end of a page stays 0: a miss refills
-    struct Entry { std::uintptr_t key{}; unsigned location{}; std::uint64_t prefix{}, changes{}; std::optional<dingosdk::Json> value; };
-    thread_local std::array<Entry, 256> cache;
-    const auto changes = profile::Store::changes();
-    auto& entry = cache[((address >> 3) ^ (address >> 11) ^ location) & 255];
-    if (entry.key != address || entry.location != location || entry.prefix != prefix || entry.changes != changes) {
-        char text[256];
-        const auto length = memory::peek_cstring(address, text, sizeof(text));
-        if (length <= 0) return nullptr;
-        for (std::ptrdiff_t i = 0; i < length; ++i) {
-            const auto c = static_cast<unsigned char>(text[i]);
-            if (c < 32 || c == 127) return nullptr;
-        }
-        entry.changes = 0;
-        entry.value = local_runtime().store->native_profile_option(location, std::string_view(text, static_cast<std::size_t>(length)));
-        entry.key = address;
-        entry.location = location;
-        entry.prefix = prefix;
-        entry.changes = changes;
-    }
-    return entry.value ? &*entry.value : nullptr;
-}
 }
 
 bool restore_native_setting(std::uintptr_t group, const char* key, std::uintptr_t type,
@@ -118,18 +82,15 @@ const NativeSettingValue* native_setting_get(std::uintptr_t group, const char* k
     auto* result = native_settings().get(group, key);
     PreserveError preserve;
     try {
-        const auto location = native_settings_location(group);
-        const auto* saved = location ? saved_native_option(location, key) : nullptr;
+        const auto location = native_settings_location(group); std::string id;
+        if (!location || !identifier(&key, id)) return result;
+        const auto saved = local_runtime().store->native_profile_option(location, id);
         if (!saved) return result;
         const auto current = native_setting_json(result);
-        if (!current || *current == *saved) return result;
-        // Copied before the restore: a get it causes on this thread reuses the cache.
-        const auto wanted = *saved;
-        std::string name;
-        (void)identifier(&key, name);
         NativeSettingValue native{};
-        if (memory::peek(reinterpret_cast<std::uintptr_t>(result), native) && restore_native_setting(group, key, native.type, wanted))
-            dingosdk::logging::event(dingosdk::logging::Channel::settings, dingosdk::Json{{"event","local_native_setting_restored"},{"location",location},{"key",name}}.dump().c_str());
+        if (current && *current != *saved && read(reinterpret_cast<std::uintptr_t>(result), native) &&
+            restore_native_setting(group, key, native.type, *saved))
+            dingosdk::logging::event(dingosdk::logging::Channel::settings, dingosdk::Json{{"event","local_native_setting_restored"},{"location",location},{"key",id}}.dump().c_str());
     } catch (...) { dingosdk::logging::event(dingosdk::logging::Channel::settings, "{\"event\":\"local_native_setting_restore_failed\"}"); }
     return result;
 }

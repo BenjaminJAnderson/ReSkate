@@ -965,6 +965,24 @@ std::uint64_t map_hash(std::string_view value) noexcept {
     }
     return result;
 }
+Transform interpolate(const Transform &a, const Transform &b, float t) {
+    Transform out;
+    t = std::clamp(t, 0.0f, 1.0f);
+    for (unsigned i = 0; i < 3; ++i) {
+        out.position[i] = std::lerp(a.position[i], b.position[i], t);
+        out.scale[i] = std::lerp(a.scale[i], b.scale[i], t);
+    }
+    float dot{}, norm{};
+    for (unsigned i = 0; i < 4; ++i)
+        dot += a.rotation[i] * b.rotation[i];
+    for (unsigned i = 0; i < 4; ++i) {
+        out.rotation[i] = std::lerp(a.rotation[i], dot < 0 ? -b.rotation[i] : b.rotation[i], t);
+        norm += out.rotation[i] * out.rotation[i];
+    }
+    for (float &v : out.rotation)
+        v /= std::sqrt(norm);
+    return out;
+}
 std::array<float, 16> to_matrix(const Transform &t) {
     const auto q = interpolate(t, t, 0).rotation;
     const float x = q[0], y = q[1], z = q[2], w = q[3];

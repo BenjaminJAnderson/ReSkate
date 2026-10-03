@@ -68,7 +68,7 @@ template<unsigned Kind> void population_tick(std::uintptr_t manager) {
             const auto found = p.nodes.find(manager);
             if (found != p.nodes.end() && population_identity(manager, found->second.realm)) {
                 auto& node = found->second; std::uintptr_t config{}; std::uint8_t running{};
-                if (memory::peek(manager + 0x108, config) && memory::peek(manager + 0x152, running) && running == 1) {
+                if (read(manager + 0x108, config) && read(manager + 0x152, running) && running == 1) {
                     config &= ~std::uintptr_t{4};
                     if (config != node.config) { population_release_config(manager); node.config = config; }
                     if (population_config_identity(config)) {
@@ -90,7 +90,7 @@ template<unsigned Kind> void population_tick(std::uintptr_t manager) {
                         p.observed_at[Kind] = GetTickCount64(); r.model.population_ready[Kind] = ok;
                         std::uintptr_t begin{}, end{};
                         const unsigned offset = Kind == 0 ? 0xa8 : 0xe8;
-                        if (memory::peek(manager + offset, begin) && memory::peek(manager + offset + 8, end) && end >= begin && end - begin <= 8000)
+                        if (read(manager + offset, begin) && read(manager + offset + 8, end) && end >= begin && end - begin <= 8000)
                             r.model.population[Kind] = static_cast<unsigned>((end - begin) / 8);
                     }
                 }
