@@ -6,6 +6,7 @@
 #include "Extension/Objects/network_object_runtime.h"
 #include "Extension/Objects/ParkEditor/park_editor_runtime.h"
 #include "Engine/Core/Platform/launcher_support.h"
+#include "Engine/Core/Text/word_filter.h"
 #include "Engine/Game/Multiplayer/session_tools.h"
 #include <algorithm>
 #include <cmath>
@@ -739,6 +740,9 @@ std::string command(std::string_view action, std::string_view argument, std::str
             if (lobby_name.size() > 128 || std::any_of(lobby_name.begin(), lobby_name.end(),
                 [](unsigned char c) { return c < 32 || c == 127; }))
                 return "Lobby names must be at most 128 bytes with no control characters.";
+            // A lobby browsers refuse to list is no use to anyone: say so while it can be fixed.
+            if (text::contains_bad_words(lobby_name))
+                return "That lobby name contains blocked words. Choose another one.";
         }
         std::optional<Invite> invitation;
         if (action == "join") {
@@ -768,7 +772,9 @@ std::string command(std::string_view action, std::string_view argument, std::str
             }
             s.mode = Mode::host;
             s.host_id = s.transport.status().local_id;
-            s.lobby_name = lobby_name.empty() ? s.transport.name(s.host_id) : std::string(lobby_name);
+            // Falling back to the Steam name: that one is not the player's to retype, so mask it.
+            s.lobby_name = lobby_name.empty() ? text::mask_bad_words(s.transport.name(s.host_id))
+                                              : std::string(lobby_name);
             if (s.lobby_name.empty()) s.lobby_name = "ReSkate session";
             s.invite = format_invite({s.host_id, s.secret});
             s.public_host = visibility == "public";

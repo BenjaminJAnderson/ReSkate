@@ -32,16 +32,18 @@ char fold(char c) {
 }
 
 // Longer list words that are common inside ordinary ones ("hell" in hello, "arse" in parse,
-// "puta" in reputation, "turd" in saturday): these only count as a whole word.
+// "puta" in reputation, "turd" in saturday, "rapist" in therapist): these only count as a
+// whole word.
 constexpr std::string_view whole_word_only[]{
-    "anus",   "arse",   "ayir",  "bich",     "breasts", "cawk",  "cawks",  "chuj",       "cipa",     "crap",
-    "dego",   "dike",   "dupa",  "ekto",     "faen",    "faig",  "faigs",  "fanny",      "fart",     "fitt",
-    "flipping", "gays", "gayz",  "gook",     "hell",    "hells", "hoar",   "hoer",       "hoor",     "hore",
-    "injun",  "jiss",   "kawk",  "knob",     "knobs",   "knobz", "kraut",  "kunt",       "kunts",    "kuntz",
-    "kusi",   "merd",   "muie",  "nasty",    "nastt",   "packi", "packie", "packy",      "paki",     "pakie",
-    "paky",   "paska",  "perse", "picka",    "pillu",   "polac", "polak",  "poop",       "pric",     "prik",
-    "pron",   "pula",   "pule",  "pusse",    "puta",    "puto",  "rautenberg", "schaffer", "screw",  "screwing",
-    "semen",  "shiz",   "smut",  "teets",    "teez",    "tits",  "titt",   "turd",       "woose"};
+    "anus", "arse", "ayir", "bich", "breasts", "cawk", "cawks", "chuj", "cipa", "crap",
+    "dego", "dike", "dupa", "ekto", "faen", "faig", "faigs", "fanny", "fart", "fitt",
+    "flipping", "gays", "gayz", "gook", "hell", "hells", "hoar", "hoer", "hoor", "hore",
+    "injun", "jiss", "kawk", "knob", "knobs", "knobz", "kraut", "kunt", "kunts", "kuntz",
+    "kusi", "merd", "muie", "nastt", "nasty", "packi", "packie", "packy", "paki", "pakie",
+    "paky", "paska", "perse", "picka", "pillu", "polac", "polak", "poop", "pric", "prik",
+    "pron", "pula", "pule", "pusse", "puta", "puto", "rape", "raped", "rapes", "raping",
+    "rapist", "rapists", "rautenberg", "schaffer", "screw", "screwing", "semen", "shiz", "smut", "teets",
+    "teez", "tits", "titt", "turd", "woose"};
 
 // Ordinary words with a bad word inside; a match that one of these covers does not count.
 constexpr std::string_view allowed_words[]{

@@ -1,4 +1,5 @@
 #include "steam_lobbies.h"
+#include "Engine/Core/Text/word_filter.h"
 #include "Engine/Game/Build/supported_build.h"
 #include <algorithm>
 #include <charconv>
@@ -248,11 +249,14 @@ void SteamLobbies::tick(std::uint64_t now) {
             state_.browser = "Steam lobby search failed. Refresh to retry.";
             return;
         }
+        // Lobbies named with bad words are never listed, like dedicated servers; the host
+        // can still share the join code.
         for (std::uint32_t i = 0; i < std::min(result.count, 50U); ++i) {
             const auto id = api_->at(static_cast<int>(i));
             const auto row = read_lobby(id, 0, [&](const char *key) { return api_->data(id, key); });
-            if (row && std::none_of(state_.rows.begin(), state_.rows.end(),
-                                    [id](const auto &v) { return v.id == id; }))
+            if (row && !text::contains_bad_words(row->name) &&
+                std::none_of(state_.rows.begin(), state_.rows.end(),
+                             [id](const auto &v) { return v.id == id; }))
                 state_.rows.push_back(*row);
         }
         state_.browser = state_.rows.empty()

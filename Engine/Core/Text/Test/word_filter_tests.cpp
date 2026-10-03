@@ -37,6 +37,9 @@ int main() {
     bad("f u c k");
     bad("F.U.C.K. yeah");
     bad("b17ch");
+    bad("evil ass rape server");
+    bad("Rapist Crew");
+    bad("gangrape lobby");
     // Ordinary words that contain a listed word, and server names people use.
     clean("Hello World");
     clean("Shell Shock Skatepark");
@@ -56,6 +59,11 @@ int main() {
     clean("Essex Street League");
     clean("Pakistan Plaza");
     clean("Scrapyard DIY");
+    clean("Grape Street Bowl");
+    clean("Scraped Knees Crew");
+    clean("Trapeze Transfers");
+    clean("Draping the rails");
+    clean("Physical Therapist Pipe");
     clean("ReSkate server");
     clean("");
     // Masking keeps everything else and the length.
