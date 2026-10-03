@@ -1,6 +1,7 @@
 #pragma once
 #include "Engine/Game/Multiplayer/chat_rate.h"
 #include "session.h"
+#include "Extension/Customization/developer_hoodie.h"
 #include "Extension/Multiplayer/Remote/native_skater.h"
 #include "Extension/Multiplayer/Voice/voice_chat.h"
 #include "Extension/Multiplayer/Steam/steam_transport.h"
@@ -96,6 +97,7 @@ struct Peer {
     // Bumped per accepted outfit; render compares it with the one its actor wears
     // (0 after a spawn) to spread native recipe applies over frames.
     std::uint64_t cosmetic_revision{}, applied_cosmetics{};
+    DeveloperHoodieState developer_hoodie;
     AudioBuffer audio;
     std::uint32_t voice_sequence{};
     bool received_voice{};

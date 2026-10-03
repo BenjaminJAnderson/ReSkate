@@ -444,6 +444,7 @@ void render(Session &s, std::uintptr_t client, const NativeFrame &local, std::ui
         // the spectate position are still refreshed (sound events are released one per frame).
         if (was_visible && local.ready && !p.render_failed && p.far_interval && now < p.next_far_sample &&
             !(p.far_for_view && !out_of_view(p, view))) {
+            update_developer_hoodie(s.base, remote_skater_entity(), p.member.id, remote_skater_generation(), p.developer_hoodie);
             present_audio(p);
             update_party_position(&p.render_pose);
             if (labels) label(p);
@@ -518,6 +519,8 @@ void render(Session &s, std::uintptr_t client, const NativeFrame &local, std::ui
                     sampled ? "Waiting for the player's cosmetic recipe." : "Waiting for player poses.";
             }
         }
+        update_developer_hoodie(s.base, p.visible ? remote_skater_entity() : 0, p.member.id,
+                                 remote_skater_generation(), p.developer_hoodie);
         if (!p.visible) {
             stop_remote_audio();
             p.presented_audio.reset();
