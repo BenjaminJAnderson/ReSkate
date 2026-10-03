@@ -505,6 +505,35 @@ std::string steam_persona_name() {
     return name;
 }
 
+// Skate.exe hard-imports MiniDumpWriteDump from the Windows API set
+// api-ms-win-core-debug-minidump-l1-1-0.dll. Windows resolves that set through
+// its API set schema, so no such file exists on disk; Wine/Proton does not map
+// it, leaving the import unresolved so the game aborts in the loader before
+// injection (seen as "Cannot sample the executable primary thread", Windows
+// error 5, once the suspended thread tears down). dbghelp.dll exports
+// MiniDumpWriteDump under the same name, so a copy of it beside Skate.exe under
+// the API set's file name satisfies the import. On Windows the schema is used
+// instead and a same-named file is ignored, so creating it there is harmless.
+void ensure_minidump_apiset_shim(const fs::path& game_directory) noexcept {
+    try {
+        const auto shim = game_directory / L"api-ms-win-core-debug-minidump-l1-1-0.dll";
+        std::error_code ec;
+        if (fs::exists(shim, ec)) return;
+        std::array<wchar_t, MAX_PATH> system{};
+        const auto length = GetSystemDirectoryW(system.data(), static_cast<UINT>(system.size()));
+        if (!length || length >= system.size()) return;
+        const auto source = fs::path(std::wstring(system.data(), length)) / L"dbghelp.dll";
+        if (!fs::exists(source, ec)) return;
+        if (fs::copy_file(source, shim, fs::copy_options::none, ec) && !ec)
+            logging::write(logging::Level::info, logging::Channel::launcher,
+                L"Created api-ms-win-core-debug-minidump-l1-1-0.dll from dbghelp.dll so Skate.exe's "
+                L"MiniDumpWriteDump import resolves under Wine/Proton");
+        else if (ec)
+            logging::log(logging::Level::warning, logging::Channel::launcher,
+                "Could not create the MiniDumpWriteDump API-set shim beside Skate.exe: {}", ec.message());
+    } catch (...) {}
+}
+
 DWORD start_game(const Session& session, const launcher::LaunchOptions& options,
                  const std::function<void(DWORD)>& created) {
     const auto& self = session.self;
@@ -519,6 +548,10 @@ DWORD start_game(const Session& session, const launcher::LaunchOptions& options,
         !fs::equivalent(paths.steam_api.parent_path(), paths.directory, path_error) || path_error)
         throw std::runtime_error(
             "Skate.exe, ReSkate.dll, and the original steam_api64.dll must be beside ReSkateLauncher.exe");
+
+    // Satisfy Skate.exe's MiniDumpWriteDump API-set import before it is created,
+    // so the game loads under Wine/Proton instead of aborting in the loader.
+    ensure_minidump_apiset_shim(paths.directory);
 
     logging::write(logging::Level::info, logging::Channel::launcher, L"Validating exact Skate.exe SHA-256 and PE identity");
     launcher::validate_game_file(paths.game);
