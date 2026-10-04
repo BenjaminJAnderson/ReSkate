@@ -661,6 +661,14 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool ready, std::string_vi
         Session &value;
         ~PartyPublication() { try { publish_party(value); } catch (...) {} }
     } party_publication{s};
+    // Direct file write to verify tick is called
+    {
+        FILE* f = fopen("C:\\tmp\\reskate_tick_test.txt", "a");
+        if (f) {
+            fprintf(f, "tick called, mode=%d, ready=%d\n", (int)s.mode, ready);
+            fclose(f);
+        }
+    }
     try {
         logging::write(logging::Level::info, logging::Channel::runtime, "Multiplayer: tick() called, mode=0");
         std::deque<std::unique_ptr<PrivateRequest>> requests;

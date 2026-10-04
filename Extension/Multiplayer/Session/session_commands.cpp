@@ -451,6 +451,7 @@ std::string send_admin(Session &s, std::string text) {
 }
 } // namespace
 bool queue_command(std::string_view action, std::string_view argument, std::string_view password) {
+    { FILE* f = fopen("C:\\tmp\\reskate_queue_test.txt", "a"); if (f) { fprintf(f, "queue_command: %.*s\n", (int)action.size(), action.data()); fclose(f); } }
     logging::write(logging::Level::info, logging::Channel::runtime, "Multiplayer: queue_command called");
     if (launcher::offline_mode()) return false;
     if ((action != "host" && action != "host-config" && action != "join" && action != "join-lobby" && action != "join-friend-lobby" && action != "stop" &&
@@ -479,6 +480,7 @@ bool queue_command(std::string_view action, std::string_view argument, std::stri
     return true;
 }
 std::string command(std::string_view action, std::string_view argument, std::string_view password) {
+    { FILE* f = fopen("C:\\tmp\\reskate_command_test.txt", "a"); if (f) { fprintf(f, "command: %.*s\n", (int)action.size(), action.data()); fclose(f); } }
     logging::write(logging::Level::info, logging::Channel::runtime, "Multiplayer command received");
     if (launcher::offline_mode()) {
         auto &s = session();
