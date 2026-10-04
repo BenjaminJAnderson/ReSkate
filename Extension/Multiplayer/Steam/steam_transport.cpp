@@ -378,6 +378,9 @@ bool SteamTransport::host(unsigned capacity) {
     p.listener = p.listen(p.sockets, virtual_port, static_cast<int>(options.size()), options.data());
     p.state.hosting = p.listener != 0;
     p.state.detail = p.listener ? "Waiting for players to join." : "Steam could not open the P2P listener.";
+    if (!p.listener) {
+        logging::log(logging::Level::error, logging::Channel::runtime, "Multiplayer: {}", p.state.detail);
+    }
     return p.listener != 0;
 }
 bool SteamTransport::join(std::uint64_t id) {

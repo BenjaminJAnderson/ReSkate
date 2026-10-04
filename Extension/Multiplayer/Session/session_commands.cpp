@@ -477,7 +477,12 @@ bool queue_command(std::string_view action, std::string_view argument, std::stri
     return true;
 }
 std::string command(std::string_view action, std::string_view argument, std::string_view password) {
-    if (launcher::offline_mode()) return "Multiplayer is unavailable in offline mode. Start Steam and relaunch ReSkate.";
+    if (launcher::offline_mode()) {
+        auto &s = session();
+        s.status = "Multiplayer is unavailable in offline mode. Start Steam and relaunch ReSkate.";
+        publish(s);
+        return s.status;
+    }
     const bool configured_host = action == "host-config";
     if (configured_host) action = "host";
     PrivateRequest input;
@@ -497,7 +502,11 @@ std::string command(std::string_view action, std::string_view argument, std::str
             if (result != "Sent to the server.") add_chat(s, 0, "Server", result);
             return result;
         }
-        if (action == "server") return "Server commands need a dedicated server session.";
+        if (action == "server") {
+            s.status = "Server commands need a dedicated server session.";
+            publish(s);
+            return s.status;
+        }
         if (action == "chat" && !argument.empty() && argument.front() == '/') {
             // A command: /help and /tp run here; the rest (votes, admin commands) go to a
             // dedicated server, which answers in chat.
@@ -585,8 +594,11 @@ std::string command(std::string_view action, std::string_view argument, std::str
         if (action == "voice-range") {
             float range{};
             const auto parsed = std::from_chars(argument.data(), argument.data() + argument.size(), range);
-            if (parsed.ec != std::errc{} || parsed.ptr != argument.data() + argument.size() || !valid_voice_range(range))
-                return "Choose a voice range from 50 to 1000 m.";
+            if (parsed.ec != std::errc{} || parsed.ptr != argument.data() + argument.size() || !valid_voice_range(range)) {
+                s.status = "Choose a voice range from 50 to 1000 m.";
+                publish(s);
+                return s.status;
+            }
             load_host_preferences(s);
             s.host_preferences.voice_range = range;
             save_host_preferences(s);
@@ -596,26 +608,41 @@ std::string command(std::string_view action, std::string_view argument, std::str
         }
         if (action == "voice-volume") {
             const auto split = argument.find(' ');
-            if (split == std::string_view::npos) return "Choose a player and volume.";
+            if (split == std::string_view::npos) {
+                s.status = "Choose a player and volume.";
+                publish(s);
+                return s.status;
+            }
             std::uint64_t id{};
             float volume{};
             const auto player = std::from_chars(argument.data(), argument.data() + split, id);
             const auto gain = std::from_chars(argument.data() + split + 1, argument.data() + argument.size(), volume);
             if (player.ec != std::errc{} || player.ptr != argument.data() + split || !find_peer(s, id) ||
-                gain.ec != std::errc{} || gain.ptr != argument.data() + argument.size() || !valid_voice_volume(volume))
-                return "Choose a connected player and a volume from 0 to 10.";
+                gain.ec != std::errc{} || gain.ptr != argument.data() + argument.size() || !valid_voice_volume(volume)) {
+                s.status = "Choose a connected player and a volume from 0 to 10.";
+                publish(s);
+                return s.status;
+            }
             s.voice.volume(id, volume);
             publish(s);
             return "Player voice volume updated.";
         }
         if (action == "voice-mute") {
             const auto split = argument.find(' ');
-            if (split == std::string_view::npos) return "Choose a player to mute.";
+            if (split == std::string_view::npos) {
+                s.status = "Choose a player to mute.";
+                publish(s);
+                return s.status;
+            }
             std::uint64_t id{};
             const auto result = std::from_chars(argument.data(), argument.data() + split, id);
             const auto enabled = argument.substr(split + 1);
             if (result.ec != std::errc{} || result.ptr != argument.data() + split || !find_peer(s, id) ||
-                (enabled != "on" && enabled != "off")) return "Choose a connected player to mute.";
+                (enabled != "on" && enabled != "off")) {
+                s.status = "Choose a connected player to mute.";
+                publish(s);
+                return s.status;
+            }
             s.voice.mute(id, enabled == "on");
             publish(s);
             return enabled == "on" ? "Player voice muted." : "Player voice unmuted.";
@@ -676,19 +703,28 @@ std::string command(std::string_view action, std::string_view argument, std::str
                 publish(s);
                 return s.status;
             }
-            if (s.lobbies.status().joining)
-                return "A lobby join is already in progress.";
+            if (s.lobbies.status().joining) {
+                s.status = "A lobby join is already in progress.";
+                publish(s);
+                return s.status;
+            }
             std::uint64_t id{};
             const auto result = std::from_chars(argument.data(), argument.data() + argument.size(), id);
-            if (result.ec != std::errc{} || result.ptr != argument.data() + argument.size() || !id)
-                return "Invalid lobby selection. Refresh the browser.";
+            if (result.ec != std::errc{} || result.ptr != argument.data() + argument.size() || !id) {
+                s.status = "Invalid lobby selection. Refresh the browser.";
+                publish(s);
+                return s.status;
+            }
             // A dedicated server's row carries its join code.
             if (const auto *server = s.servers.find(id)) {
                 const auto code = server->code;
                 return command("join", code, input.password);
             }
-            if (!s.transport.open())
-                return s.transport.status().detail;
+            if (!s.transport.open()) {
+                s.status = s.transport.status().detail;
+                publish(s);
+                return s.status;
+            }
             if (action == "join-friend-lobby")
                 s.lobbies.join_friend(id, s.transport.status().local_id, now_us());
             else
@@ -705,8 +741,11 @@ std::string command(std::string_view action, std::string_view argument, std::str
             publish(s);
             return s.status;
         }
-        if (action != "host" && action != "join" && action != "echo")
-            return "Unknown multiplayer action.";
+        if (action != "host" && action != "join" && action != "echo") {
+            s.status = "Unknown multiplayer action.";
+            publish(s);
+            return s.status;
+        }
         unsigned capacity = multiplayer_lobby_player_limit;
         unsigned tps = multiplayer_default_tps;
         std::string_view lobby_name;
@@ -721,34 +760,52 @@ std::string command(std::string_view action, std::string_view argument, std::str
                 if (name_start != std::string_view::npos) lobby_name = options.substr(name_start + 1);
                 const auto result = std::from_chars(number.data(), number.data() + number.size(), capacity);
                 if (result.ec != std::errc{} || result.ptr != number.data() + number.size() || capacity < 2 ||
-                    capacity > multiplayer_lobby_player_limit)
-                    return "Choose a player limit from 2 to " + std::to_string(multiplayer_lobby_player_limit) + ".";
+                    capacity > multiplayer_lobby_player_limit) {
+                    s.status = "Choose a player limit from 2 to " + std::to_string(multiplayer_lobby_player_limit) + ".";
+                    publish(s);
+                    return s.status;
+                }
             }
-            if (!visibility.empty() && visibility != "code" && visibility != "public")
-                return "Use mp host code <limit> [lobby name] or mp host public <limit> [lobby name].";
+            if (!visibility.empty() && visibility != "code" && visibility != "public") {
+                s.status = "Use mp host code <limit> [lobby name] or mp host public <limit> [lobby name].";
+                publish(s);
+                return s.status;
+            }
             if (configured_host) {
                 const auto split = lobby_name.find(' ');
                 const auto rate = lobby_name.substr(0, split);
                 const auto result = std::from_chars(rate.data(), rate.data() + rate.size(), tps);
-                if (result.ec != std::errc{} || result.ptr != rate.data() + rate.size() || !valid_multiplayer_tps(tps))
-                    return "Choose 20, 30, 60, or 120 TPS before hosting.";
+                if (result.ec != std::errc{} || result.ptr != rate.data() + rate.size() || !valid_multiplayer_tps(tps)) {
+                    s.status = "Choose 20, 30, 60, or 120 TPS before hosting.";
+                    publish(s);
+                    return s.status;
+                }
                 lobby_name = split == std::string_view::npos ? std::string_view{} : lobby_name.substr(split + 1);
             }
             const auto first = lobby_name.find_first_not_of(' ');
             lobby_name = first == std::string_view::npos ? std::string_view{}
                 : lobby_name.substr(first, lobby_name.find_last_not_of(' ') - first + 1);
             if (lobby_name.size() > 128 || std::any_of(lobby_name.begin(), lobby_name.end(),
-                [](unsigned char c) { return c < 32 || c == 127; }))
-                return "Lobby names must be at most 128 bytes with no control characters.";
+                [](unsigned char c) { return c < 32 || c == 127; })) {
+                s.status = "Lobby names must be at most 128 bytes with no control characters.";
+                publish(s);
+                return s.status;
+            }
             // A lobby browsers refuse to list is no use to anyone: say so while it can be fixed.
-            if (text::contains_bad_words(lobby_name))
-                return "That lobby name contains blocked words. Choose another one.";
+            if (text::contains_bad_words(lobby_name)) {
+                s.status = "That lobby name contains blocked words. Choose another one.";
+                publish(s);
+                return s.status;
+            }
         }
         std::optional<Invite> invitation;
         if (action == "join") {
             invitation = parse_invite(argument);
-            if (!invitation)
-                return "Invalid join code. Paste the complete SteamID-session code from the host.";
+            if (!invitation) {
+                s.status = "Invalid join code. Paste the complete SteamID-session code from the host.";
+                publish(s);
+                return s.status;
+            }
         }
         stop(s, "Starting multiplayer...");
         s.chat.clear(); // A new session starts with an empty chat.
