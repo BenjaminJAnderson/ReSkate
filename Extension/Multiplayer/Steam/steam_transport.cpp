@@ -279,27 +279,43 @@ bool SteamTransport::bind(void *library, void *sockets, void *networking_utils) 
 }
 bool SteamTransport::open() {
     auto &p = *impl_;
-    if (p.state.ready)
+    if (p.state.ready) {
+        logging::log(logging::Level::debug, logging::Channel::runtime, "Multiplayer: Steam transport already open");
         return true;
+    }
+    logging::log(logging::Level::info, logging::Channel::runtime, "Multiplayer: opening Steam transport");
     try {
-        if (launcher::offline_mode())
+        if (launcher::offline_mode()) {
+            logging::log(logging::Level::error, logging::Channel::runtime, "Multiplayer: offline mode detected");
             throw std::runtime_error("Multiplayer is unavailable in offline mode. Start Steam and relaunch ReSkate.");
+        }
         const auto module = GetModuleHandleW(L"steam_api64.dll");
-        if (!module)
+        if (!module) {
+            logging::log(logging::Level::error, logging::Channel::runtime, "Multiplayer: steam_api64.dll not loaded");
             throw std::runtime_error("Steam DLL is not loaded. Start ReSkate with Steam running.");
+        }
+        logging::log(logging::Level::info, logging::Channel::runtime, "Multiplayer: steam_api64.dll loaded");
         std::wstring path(32768, L'\0');
         const auto length = GetModuleFileNameW(module, path.data(), static_cast<DWORD>(path.size()));
-        if (!length || length >= path.size())
+        if (!length || length >= path.size()) {
+            logging::log(logging::Level::error, logging::Channel::runtime, "Multiplayer: cannot verify Steam DLL location");
             throw std::runtime_error("Cannot verify Steam DLL location.");
+        }
         path.resize(length);
         launcher::validate_steam_api_file(std::filesystem::path(path));
         const auto user = symbol<int (*)()>(module, "SteamAPI_GetHSteamUser")();
-        if (!user)
+        if (!user) {
+            logging::log(logging::Level::error, logging::Channel::runtime, "Multiplayer: Steam not initialized (GetHSteamUser failed)");
             throw std::runtime_error(
                 "The game has not initialized Steam. Keep Steam online and restart ReSkate.");
+        }
+        logging::log(logging::Level::info, logging::Channel::runtime, "Multiplayer: Steam initialized, user={}", user);
         void *utils = symbol<void *(*)()>(module, "SteamAPI_SteamUtils_v010")();
-        if (!utils || symbol<uint32 (*)(void *)>(module, "SteamAPI_ISteamUtils_GetAppID")(utils) != 3354750)
+        if (!utils || symbol<uint32 (*)(void *)>(module, "SteamAPI_ISteamUtils_GetAppID")(utils) != 3354750) {
+            logging::log(logging::Level::error, logging::Channel::runtime, "Multiplayer: Steam app ID mismatch");
             throw std::runtime_error("Steam app identity does not match skate.");
+        }
+        logging::log(logging::Level::info, logging::Channel::runtime, "Multiplayer: Steam app ID verified");
         // Cosmetic lookup is optional; missing Friends support must not stop P2P.
         try {
             p.friends = symbol<void *(*)()>(module, "SteamAPI_SteamFriends_v017")();
@@ -307,13 +323,17 @@ bool SteamTransport::open() {
                 symbol<decltype(p.persona_name)>(module, "SteamAPI_ISteamFriends_GetFriendPersonaName");
             p.request_name =
                 symbol<decltype(p.request_name)>(module, "SteamAPI_ISteamFriends_RequestUserInformation");
+            logging::log(logging::Level::info, logging::Channel::runtime, "Multiplayer: Steam friends interface loaded");
         } catch (...) {
+            logging::log(logging::Level::warning, logging::Channel::runtime, "Multiplayer: Steam friends interface unavailable");
             p.friends = nullptr;
         }
+        logging::log(logging::Level::info, logging::Channel::runtime, "Multiplayer: binding Steam networking sockets");
         return bind(module, symbol<void *(*)()>(module, "SteamAPI_SteamNetworkingSockets_SteamAPI_v012")(),
                     symbol<void *(*)()>(module, "SteamAPI_SteamNetworkingUtils_SteamAPI_v004")());
     } catch (const std::exception &e) {
         p.state.detail = e.what();
+        logging::log(logging::Level::error, logging::Channel::runtime, "Multiplayer: open() failed: {}", e.what());
         return false;
     }
 }
