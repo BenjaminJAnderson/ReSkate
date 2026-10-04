@@ -2,6 +2,7 @@
 #include "steam_lanes.h"
 #include "Extension/Multiplayer/Net/wire_codec.h"
 #include "Engine/Core/Platform/launcher_support.h"
+#include "Engine/Core/Log/logging.h"
 #include <Windows.h>
 #pragma warning(push, 0)
 #include <isteamnetworkingsockets.h>
