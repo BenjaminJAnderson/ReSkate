@@ -3,6 +3,8 @@
 #include "gui_internal.h"
 #include "gui_renderer.h"
 
+#include "Engine/Core/Log/logging.h"
+
 #include <dwmapi.h>
 #include <shellapi.h>
 
@@ -221,6 +223,12 @@ Fonts load_fonts() {
     fonts.action = font(L"FONT_HEADING", L"seguibl.ttf", 50);
     fonts.title = font(L"FONT_BRUSH", L"seguibl.ttf", 86);
     io.FontDefault = fonts.body;
+    // Built here rather than on the first frame, so the log says whether it
+    // worked. A window with no atlas draws nothing but its clear colour.
+    const bool built = io.Fonts->Build();
+    logging::log(built ? logging::Level::info : logging::Level::error, logging::Channel::launcher,
+        "Launcher fonts: atlas {}x{} {}.", io.Fonts->TexWidth, io.Fonts->TexHeight,
+        built ? "built" : "COULD NOT BE BUILT, so the window will be empty");
     return fonts;
 }
 
@@ -313,6 +321,9 @@ int run(const launcher_app::Session& session, const std::vector<std::wstring>& a
 
     const int width = static_cast<int>(S(design_width));
     const int height = static_cast<int>(S(design_height));
+    logging::log(logging::Level::info, logging::Channel::launcher,
+        "Launcher window: {}x{} at scale {:.2f} (system DPI {}), work area {}x{}.", width, height, g_scale,
+        GetDpiForSystem(), work.right - work.left, work.bottom - work.top);
     const HWND window = CreateWindowExW(WS_EX_APPWINDOW, window_class.lpszClassName, L"ReSkate",
         WS_POPUP | WS_MINIMIZEBOX | WS_SYSMENU, work.left + (work.right - work.left - width) / 2,
         work.top + (work.bottom - work.top - height) / 2, width, height, nullptr, nullptr, instance, nullptr);
@@ -334,7 +345,9 @@ int run(const launcher_app::Session& session, const std::vector<std::wstring>& a
         ImGui_ImplWin32_Shutdown();
         ImGui::DestroyContext();
         DestroyWindow(window);
-        throw std::runtime_error("Cannot start Direct3D 12 for the launcher window");
+        throw std::runtime_error("This PC's graphics driver cannot draw the launcher's window. Update your "
+            "graphics driver and try again. If that does not help, the graphics card is below what ReSkate and "
+            "skate. need. The log names the card it tried to use.");
     }
     g_renderer = &renderer;
     {
@@ -376,6 +389,7 @@ int run(const launcher_app::Session& session, const std::vector<std::wstring>& a
         HANDLE game{};
         DWORD game_id{};
         bool hidden{};
+        bool drew{};
         while (running) {
             MSG message;
             while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
@@ -423,6 +437,10 @@ int run(const launcher_app::Session& session, const std::vector<std::wstring>& a
             frame(launcher, fonts, window, ui, mods_panel);
             ImGui::Render();
             renderer.render();
+            if (!drew) {
+                drew = true;
+                logging::write(logging::Level::info, logging::Channel::launcher, "Launcher drew its first frame.");
+            }
         }
         ShowWindow(window, SW_HIDE);
         if (game) CloseHandle(game);
