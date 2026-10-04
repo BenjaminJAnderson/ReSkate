@@ -662,11 +662,13 @@ void tick(std::uintptr_t base, std::uintptr_t client, bool ready, std::string_vi
         ~PartyPublication() { try { publish_party(value); } catch (...) {} }
     } party_publication{s};
     try {
+        logging::printf(logging::Level::info, logging::Channel::runtime, "Multiplayer: tick() called, mode=%d", (int)s.mode);
         std::deque<std::unique_ptr<PrivateRequest>> requests;
         {
             std::lock_guard lock(s.request_mutex);
             requests.swap(s.requests);
         }
+        logging::printf(logging::Level::info, logging::Channel::runtime, "Multiplayer: %zu requests in queue", requests.size());
         const auto dispatch_now = now_us();
         for (auto &request : requests)
             if (dispatch_now - request->queued <= 10000000)

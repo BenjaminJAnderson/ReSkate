@@ -451,6 +451,7 @@ std::string send_admin(Session &s, std::string text) {
 }
 } // namespace
 bool queue_command(std::string_view action, std::string_view argument, std::string_view password) {
+    logging::printf(logging::Level::info, logging::Channel::runtime, "Multiplayer: queue_command called action=%.*s", (int)action.size(), action.data());
     if (launcher::offline_mode()) return false;
     if ((action != "host" && action != "host-config" && action != "join" && action != "join-lobby" && action != "join-friend-lobby" && action != "stop" &&
          action != "distances" && action != "object-placement" && action != "kick" && action != "clear-objects" &&
