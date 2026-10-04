@@ -7,6 +7,7 @@
 #include "Extension/Objects/ParkEditor/park_editor_runtime.h"
 #include "Engine/Core/Platform/launcher_support.h"
 #include "Engine/Core/Text/word_filter.h"
+#include "Engine/Core/Log/logging.h"
 #include "Engine/Game/Multiplayer/session_tools.h"
 #include <algorithm>
 #include <cmath>
@@ -477,7 +478,7 @@ bool queue_command(std::string_view action, std::string_view argument, std::stri
     return true;
 }
 std::string command(std::string_view action, std::string_view argument, std::string_view password) {
-    logging::log(logging::Level::info, logging::Channel::runtime, "Multiplayer command: {} arg={}", action, argument);
+    logging::printf(logging::Level::info, logging::Channel::runtime, "Multiplayer command: %.*s arg=%.*s", (int)action.size(), action.data(), (int)argument.size(), argument.data());
     if (launcher::offline_mode()) {
         auto &s = session();
         s.status = "Multiplayer is unavailable in offline mode. Start Steam and relaunch ReSkate.";
@@ -823,14 +824,14 @@ std::string command(std::string_view action, std::string_view argument, std::str
             note_slot(s, 0);
             s.status = "Local Echo: a delayed copy follows your recorded path at " + std::to_string(s.tps) + " TPS.";
         } else if (action == "host") {
-            logging::log(logging::Level::info, logging::Channel::runtime, "Multiplayer: attempting to host, capacity={}", capacity);
+            logging::printf(logging::Level::info, logging::Channel::runtime, "Multiplayer: attempting to host, capacity=%u", capacity);
             if (!s.transport.host(capacity)) {
-                logging::log(logging::Level::error, logging::Channel::runtime, "Multiplayer: transport.host() failed: {}", s.transport.status().detail);
+                logging::printf(logging::Level::error, logging::Channel::runtime, "Multiplayer: transport.host() failed: %s", s.transport.status().detail.c_str());
                 s.status = s.transport.status().detail;
                 publish(s);
                 return s.status;
             }
-            logging::log(logging::Level::info, logging::Channel::runtime, "Multiplayer: transport.host() succeeded, local_id={}", s.transport.status().local_id);
+            logging::printf(logging::Level::info, logging::Channel::runtime, "Multiplayer: transport.host() succeeded, local_id=%llu", s.transport.status().local_id);
             s.mode = Mode::host;
             // Falling back to the Steam name: that one is not the player's to retype, so mask it.
             s.lobby_name = lobby_name.empty() ? text::mask_bad_words(s.transport.name(s.host_id))
